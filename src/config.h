@@ -94,6 +94,7 @@
 #define MODE_RADAR     2
 #define MODE_CAROUSEL  3
 #define MODE_NOTIFY    4             // transient overlay: armed over HTTP, never persisted
+#define MODE_WEATHER   5
 #define DEFAULT_MODE MODE_STOCKS
 #define DEFAULT_CAROUSEL_SEC 30      // per-mode dwell in carousel
 
@@ -116,6 +117,9 @@
 #endif
 #ifndef WITH_RADAR
 #define WITH_RADAR 1
+#endif
+#ifndef WITH_WEATHER
+#define WITH_WEATHER 1
 #endif
 
 // Claude usage mode: once data stops arriving for this long (PC asleep, daemon
@@ -202,6 +206,23 @@
 #define DEFAULT_RADAR_LON       0.0f
 #define DEFAULT_RADAR_RANGE_KM  20
 #define DEFAULT_RADAR_POLL_SEC  10     // >=3 keeps us under the 1 req/s limit
+
+// ---------------------------------------------------------------------------
+// Weather (MODE_WEATHER)
+// Open-Meteo forecast endpoint: free, no API key, no account. One HTTPS GET
+// returns current conditions plus today's high/low for the given lat/lon.
+// Full path built in WeatherClient.cpp: /v1/forecast?latitude=..&longitude=..
+// &current=temperature_2m,weather_code,is_day&daily=temperature_2m_max,
+// temperature_2m_min&timezone=auto&temperature_unit=celsius|fahrenheit
+// ---------------------------------------------------------------------------
+#define WEATHER_HOST        "api.open-meteo.com"
+#define WEATHER_PATH        "/v1/forecast"
+#define WEATHER_USER_AGENT  "Mozilla/5.0 (SmallTV)"
+
+#define DEFAULT_WEATHER_LAT       0.0f
+#define DEFAULT_WEATHER_LON       0.0f
+#define DEFAULT_WEATHER_POLL_SEC  600     // 10 min — a home forecast doesn't need to be fresher
+#define DEFAULT_WEATHER_FAHRENHEIT false  // false = Celsius
 
 // ---------------------------------------------------------------------------
 // Defaults (used on first boot / factory reset)

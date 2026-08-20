@@ -161,6 +161,19 @@ struct RadarSettings {
   void fromJson(JsonObjectConst o);
 };
 
+// ---- Weather feature slice --------------------------------------------------
+struct WeatherSettings {
+  float    lat;           // location latitude  (0,0 = not set yet)
+  float    lon;           // location longitude
+  String   place;         // free-text label shown on screen (e.g. "Seoul")
+  bool     fahrenheit;    // false = Celsius
+  uint16_t pollSec;       // refresh period
+
+  void setDefaults();
+  void toJson(JsonObject o) const;
+  void fromJson(JsonObjectConst o);
+};
+
 // ---- Top-level settings ----------------------------------------------------
 struct Settings {
   // --- WiFi station networks (the device joins one of these) ---
@@ -177,7 +190,7 @@ struct Settings {
 
   // --- Carousel (mode == MODE_CAROUSEL): dwell + which features rotate ---
   uint16_t carouselSec;
-  bool carouselTicker, carouselUsage, carouselRadar;
+  bool carouselTicker, carouselUsage, carouselRadar, carouselWeather;
 
   // --- Shared HTTP / display ---
   uint16_t httpTimeout; // ms
@@ -190,6 +203,7 @@ struct Settings {
   TickerSettings  ticker;
   UsageSettings   usage;
   RadarSettings   radar;
+  WeatherSettings weather;
   ClockSettings   clock;
   DisplaySettings display;   // panel colour correction
   WgSettings      wg;        // WireGuard tunnel (ESP32 targets)

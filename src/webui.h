@@ -67,6 +67,7 @@ small.hint{display:block;color:var(--mut);margin-top:4px;font-size:12px}
  <button data-t="ticker">Ticker</button>
  <button data-t="usage">Clawdmeter</button>
  <button data-t="radar">Radar</button>
+ <button data-t="weather">Weather</button>
  <button data-t="update">System</button>
 </nav>
 <main>
@@ -125,6 +126,7 @@ small.hint{display:block;color:var(--mut);margin-top:4px;font-size:12px}
     <option value="stocks">Ticker</option>
     <option value="usage">Clawdmeter</option>
     <option value="radar">Radar</option>
+    <option value="weather">Weather</option>
     <option value="carousel">Carousel (rotate modes)</option>
    </select>
    <div id="carouselRow">
@@ -132,6 +134,7 @@ small.hint{display:block;color:var(--mut);margin-top:4px;font-size:12px}
     <div class="chk"><input id="carouselTicker" type="checkbox"><label>Ticker</label></div>
     <div class="chk"><input id="carouselUsage" type="checkbox"><label>Clawdmeter</label></div>
     <div class="chk"><input id="carouselRadar" type="checkbox"><label>Radar</label></div>
+    <div class="chk"><input id="carouselWeather" type="checkbox"><label>Weather</label></div>
    </div>
    <small class="hint">Each name here is the tab that configures it. Pick the active feature, then set it up in its own tab. Carousel rotates through the ticked features.</small>
   </div>
@@ -293,6 +296,27 @@ small.hint{display:block;color:var(--mut);margin-top:4px;font-size:12px}
   </div>
  </section>
 
+ <!-- WEATHER (feature) -->
+ <section id="weather" class="tab">
+  <div class="card"><h2>Location</h2>
+   <div class="row">
+    <div><label>Latitude</label><input id="weatherLat" type="number" step="0.0001" placeholder="37.5665"></div>
+    <div><label>Longitude</label><input id="weatherLon" type="number" step="0.0001" placeholder="126.9780"></div>
+   </div>
+   <label>Label shown on screen (optional)</label>
+   <input id="weatherPlace" type="text" placeholder="Seoul">
+   <small class="hint">Decimal degrees, e.g. <code>37.5665</code>, <code>126.9780</code>. Leave at 0/0 and the screen prompts you to set it. Look up your coordinates on any map app.</small>
+  </div>
+  <div class="card"><h2>Units &amp; refresh</h2>
+   <div class="row">
+    <div><label>Units</label>
+     <select id="weatherFahrenheit"><option value="false">Celsius</option><option value="true">Fahrenheit</option></select></div>
+    <div><label>Refresh (s)</label><input id="weatherPollSec" type="number" min="60" max="3600"></div>
+   </div>
+   <small class="hint">Data comes from <b>Open-Meteo</b> — free, no account or API key. A home forecast doesn't need to refresh often; every 10 minutes (600s) is the default.</small>
+  </div>
+ </section>
+
  <!-- UPDATE -->
  <section id="update" class="tab">
   <div class="card"><h2>Update from GitHub</h2>
@@ -391,8 +415,8 @@ var TZMAP={
 function fillTz(){var s=$('tz');if(!s)return;var keys=Object.keys(TZMAP).filter(function(k){return k!==''});
  keys.sort();s.innerHTML='<option value="">UTC</option>'+keys.map(function(k){return '<option value="'+k+'">'+k+'</option>'}).join('');}
 
-var MODEOPT={ticker:'stocks',usage:'usage',radar:'radar'};
-var CAROPT={ticker:'carouselTicker',usage:'carouselUsage',radar:'carouselRadar'};
+var MODEOPT={ticker:'stocks',usage:'usage',radar:'radar',weather:'weather'};
+var CAROPT={ticker:'carouselTicker',usage:'carouselUsage',radar:'carouselRadar',weather:'carouselWeather'};
 function hideFeat(name){
  var b=document.querySelector('nav button[data-t="'+name+'"]'); if(b)b.remove();
  var sec=$(name); if(sec)sec.remove();
@@ -415,7 +439,7 @@ function setGain(id,lab,v){var n=(v!=null?v:100);sv(id,n);var e=$(lab);if(e)e.te
 function resetColors(){setGain('rGain','rgVal',100);setGain('gGain','ggVal',100);setGain('bGain','bgVal',100);
  toast('Gains reset — press Save settings to apply')}
 function loadConfig(){return j('/api/config').then(function(c){C=c;
- var f=c.features||{}; ['ticker','usage','radar'].forEach(function(k){if(f[k]===false)hideFeat(k)});
+ var f=c.features||{}; ['ticker','usage','radar','weather'].forEach(function(k){if(f[k]===false)hideFeat(k)});
  // WireGuard is only built for the chips with room for it; drop the card otherwise
  if(f.wireguard===false){var wc=$('wgCard'); if(wc)wc.remove()}
  var w=c.wg||{};
@@ -448,6 +472,7 @@ function loadConfig(){return j('/api/config').then(function(c){C=c;
  $('mode').value=c.mode||'stocks'; modeChanged();
  sv('carouselSec',c.carouselSec||30);
  sc('carouselTicker',c.carouselTicker!==false); sc('carouselUsage',c.carouselUsage!==false); sc('carouselRadar',c.carouselRadar!==false);
+ sc('carouselWeather',c.carouselWeather!==false);
  // ticker slice
  T_TEXT.forEach(function(k){sv(k,t[k])});
  T_NUM.forEach(function(k){sv(k,t[k])});
@@ -475,6 +500,11 @@ function loadConfig(){return j('/api/config').then(function(c){C=c;
  sv('radarUiScale',r.uiScale!=null?r.uiScale:1);
  sv('radarMinAlt',r.minAltFt!=null?r.minAltFt:0);
  renderAps(r.airports||[]);
+ // weather slice
+ var we=c.weather||{};
+ sv('weatherLat',we.lat); sv('weatherLon',we.lon); sv('weatherPlace',we.place);
+ sv('weatherFahrenheit',we.fahrenheit?'true':'false');
+ sv('weatherPollSec',we.pollSec||600);
  var au=c.auth||{};
  sc('authEnabled',!!au.enabled); sv('authUser',au.user||'admin');
  var apw=$('authPass'); if(apw){apw.value='';apw.placeholder=au.passSet?'(unchanged)':'set a password';}
@@ -530,6 +560,7 @@ function collect(){
  var o={mode:gv('mode'),
   carouselSec:parseInt(gv('carouselSec'))||30,
   carouselTicker:gc('carouselTicker'), carouselUsage:gc('carouselUsage'), carouselRadar:gc('carouselRadar'),
+  carouselWeather:gc('carouselWeather'),
   brightness:parseInt(gv('brightness'))||0,
   rotation:parseInt(gv('rotation')),
   autoBrightness:gc('autoBrightness'),
@@ -592,6 +623,12 @@ function collect(){
    if(ic)r.airports.push({icao:ic,lat:parseFloat(tr.querySelector('.ala').value)||0,lon:parseFloat(tr.querySelector('.alo').value)||0});
   });
   o.radar=r;
+ }
+ // weather slice
+ if($('weather')){
+  o.weather={lat:parseFloat(gv('weatherLat'))||0, lon:parseFloat(gv('weatherLon'))||0,
+   place:gv('weatherPlace'), fahrenheit:gv('weatherFahrenheit')==='true',
+   pollSec:parseInt(gv('weatherPollSec'))||600};
  }
  return o;
 }
