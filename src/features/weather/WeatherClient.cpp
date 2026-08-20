@@ -8,7 +8,11 @@ static uint32_t   g_nextPollMs = 0;
 
 // TLS receive-buffer size for the Open-Meteo handshake, probed once (same
 // approach as RadarClient's adsb.fi probe) so BearSSL can use the smallest
-// buffer this host's certificate chain allows.
+// buffer this host's certificate chain allows. Open-Meteo doesn't appear to
+// honor MFLN, so the probe likely falls through to the "hope it fits" branch —
+// sized generously (matching GH_QUOTES_RXBUF, used for another host with a
+// similarly large, un-negotiated cert chain) rather than the 4096 radar uses,
+// since a too-small buffer here fails the handshake outright, not just slowly.
 static uint16_t g_tlsRx = 0;
 
 const WeatherNow& weatherCurrent() { return g_w; }
@@ -26,7 +30,7 @@ static void probeTls() {
   if (g_tlsRx) return;
   if (BearSSL::WiFiClientSecure::probeMaxFragmentLength(WEATHER_HOST, 443, 512))       g_tlsRx = 512;
   else if (BearSSL::WiFiClientSecure::probeMaxFragmentLength(WEATHER_HOST, 443, 1024)) g_tlsRx = 1024;
-  else                                                                                 g_tlsRx = 4096;
+  else                                                                                 g_tlsRx = 5120;
 #endif
 }
 
@@ -83,10 +87,9 @@ static bool parseForecast(Stream& stream) {
 
 static bool fetchOnce(const Settings& s) {
   // TLS needs a contiguous heap chunk; skip rather than reset-loop if too low.
-  // (Lower than radar's 18000 — weather has no aircraft-array footprint of its
-  // own, so it fits in less free heap; tune here first if fetches keep failing
-  // on a fully-loaded build with every feature compiled in.)
-  if (ESP.getFreeHeap() < 13000) return false;
+  // Sized for the larger 5120 B fallback buffer above (radar's 18000 assumed a
+  // 4096 B buffer) — tune here first if fetches keep failing for lack of heap.
+  if (ESP.getFreeHeap() < 16000) return false;
   probeTls();
 
   std::unique_ptr<NetClient> client(platformMakeSecureClient(g_tlsRx));
