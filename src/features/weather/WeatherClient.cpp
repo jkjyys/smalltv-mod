@@ -82,8 +82,11 @@ static bool parseForecast(Stream& stream) {
 }
 
 static bool fetchOnce(const Settings& s) {
-  // TLS needs a big contiguous heap chunk; skip rather than reset-loop if low.
-  if (ESP.getFreeHeap() < 18000) return false;
+  // TLS needs a contiguous heap chunk; skip rather than reset-loop if too low.
+  // (Lower than radar's 18000 — weather has no aircraft-array footprint of its
+  // own, so it fits in less free heap; tune here first if fetches keep failing
+  // on a fully-loaded build with every feature compiled in.)
+  if (ESP.getFreeHeap() < 13000) return false;
   probeTls();
 
   std::unique_ptr<NetClient> client(platformMakeSecureClient(g_tlsRx));
