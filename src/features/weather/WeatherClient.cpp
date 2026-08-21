@@ -5,6 +5,7 @@
 
 static WeatherNow g_w = {};
 static uint32_t   g_nextPollMs = 0;
+static String     g_parseErr;   // diagnostic detail behind lastCode == -800
 
 // TLS receive-buffer size for the Open-Meteo handshake, probed once (same
 // approach as RadarClient's adsb.fi probe) so BearSSL can use the smallest
@@ -16,6 +17,7 @@ static uint32_t   g_nextPollMs = 0;
 static uint16_t g_tlsRx = 0;
 
 const WeatherNow& weatherCurrent() { return g_w; }
+const String&     weatherLastParseErr() { return g_parseErr; }
 
 void weatherInit(const Settings& s) {
   (void)s;
@@ -64,11 +66,14 @@ static bool parseForecast(Stream& stream) {
   JsonDocument doc;
   DeserializationError err =
       deserializeJson(doc, stream, DeserializationOption::Filter(filter));
-  if (err) return false;
+  if (err) { g_parseErr = String("deserialize: ") + err.c_str(); return false; }
 
   JsonObjectConst cu = doc["current"].as<JsonObjectConst>();
-  if (cu.isNull() || !(cu["temperature_2m"].is<float>() || cu["temperature_2m"].is<int>()))
+  if (cu.isNull()) { g_parseErr = "no current object"; return false; }
+  if (!(cu["temperature_2m"].is<float>() || cu["temperature_2m"].is<int>())) {
+    g_parseErr = "no current.temperature_2m";
     return false;
+  }
 
   g_w.temp   = cu["temperature_2m"].as<float>();
   g_w.code   = cu["weather_code"] | 0;
@@ -81,6 +86,7 @@ static bool parseForecast(Stream& stream) {
 
   g_w.valid = true;
   g_w.error = false;
+  g_parseErr = "";
   g_w.lastOkMs = millis();
   return true;
 }

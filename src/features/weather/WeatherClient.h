@@ -7,3 +7,4 @@ void               weatherInit(const Settings& s);
 void               weatherForceRefresh();
 void               weatherService(const Settings& s);   // call every loop tick
 const WeatherNow&  weatherCurrent();
+const String&      weatherLastParseErr();   // detail behind lastCode == -800

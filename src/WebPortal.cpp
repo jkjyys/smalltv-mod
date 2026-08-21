@@ -146,6 +146,7 @@ static void handleStatus() {
                                    // code (-1000 heap gate, -900 http.begin
                                    // failed, -800 parsed-but-bad-JSON, other
                                    // negatives are HTTPClient's own error codes)
+    if (w.lastCode == -800) { const String& pe = weatherLastParseErr(); if (pe.length()) wo["parseErr"] = pe; }
     if (w.valid) { wo["temp"] = w.temp; wo["hi"] = w.hi; wo["lo"] = w.lo; }
   }
 #endif
