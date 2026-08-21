@@ -115,6 +115,7 @@ static String buildYahooUrl(const Settings& s, const char* host, const char* sym
   url += range;
   url += F("&interval=");
   url += yahooInterval(range);
+  url += F("&includePrePost=true");   // ask for extended-hours fields too — see StockClient.cpp's parseYahoo
   return url;
 }
 
@@ -303,6 +304,9 @@ static bool parseYahoo(const Settings& s, StockData& d, Stream& stream) {
   d.extHours = false;
   d.extLabel[0] = 0;
   const char* mkt = meta["marketState"] | "";
+  strlcpy(d.dbgMarketState, mkt, sizeof(d.dbgMarketState));
+  d.dbgHasPostPrice = !meta["postMarketPrice"].isNull();
+  d.dbgHasPrePrice  = !meta["preMarketPrice"].isNull();
   bool isPost = !strcmp(mkt, "POST") || !strcmp(mkt, "POSTPOST");
   bool isPre  = !strcmp(mkt, "PRE") || !strcmp(mkt, "PREPRE");
   if (isPost && (meta["postMarketPrice"].is<float>() || meta["postMarketPrice"].is<int>())) {

@@ -19,6 +19,9 @@ struct StockData {
 
   bool  extHours;     // true if `price` is a pre/post-market quote, not the regular session's
   char  extLabel[4];  // "PRE" or "AH" when extHours is set; "" otherwise
+  char  dbgMarketState[10];  // diagnostic: raw meta.marketState from Yahoo, whatever it sent
+  bool  dbgHasPostPrice;      // diagnostic: did meta include a postMarketPrice key at all
+  bool  dbgHasPrePrice;       // diagnostic: did meta include a preMarketPrice key at all
 
   float   spark[MAX_SPARK_POINTS];
   uint8_t sparkCount;
@@ -44,6 +47,9 @@ struct StockData {
     hasChange = false;
     extHours = false;
     extLabel[0] = 0;
+    dbgMarketState[0] = 0;
+    dbgHasPostPrice = false;
+    dbgHasPrePrice = false;
     sparkCount = 0;
     valid = false;
     error = false;
