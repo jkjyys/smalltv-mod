@@ -17,6 +17,9 @@ struct StockData {
   float changePct;    // percentage change
   bool  hasChange;    // a change value was provided/derived
 
+  bool  extHours;     // true if `price` is a pre/post-market quote, not the regular session's
+  char  extLabel[4];  // "PRE" or "AH" when extHours is set; "" otherwise
+
   float   spark[MAX_SPARK_POINTS];
   uint8_t sparkCount;
 
@@ -39,6 +42,8 @@ struct StockData {
     qty = cost = 0;
     price = change = changePct = 0;
     hasChange = false;
+    extHours = false;
+    extLabel[0] = 0;
     sparkCount = 0;
     valid = false;
     error = false;

@@ -126,6 +126,7 @@ static void handleStatus() {
     if (d.error) t["retryIn"] = stockRetryInSec(i);   // seconds to the next attempt
     if (d.valid) {
       t["price"] = d.price;
+      if (d.extHours) t["extHours"] = d.extLabel;
       float chg, pct;
       bool onRange = false;
       if (stockDisplayChange(d, S->ticker, chg, pct, &onRange)) {

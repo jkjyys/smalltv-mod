@@ -159,6 +159,17 @@ static void drawStock(const StockData& d, uint8_t pageIndex, uint8_t pageCount,
     if (top < bottom - 10) drawSparkline(gfx, d, top, bottom, trendC, livePt);
   }
 
+  // Extended-hours badge (top-left) — flags that `price` is a pre/post-market
+  // quote, not the regular session's, so it doesn't get mistaken for a live
+  // regular-hours price when the two diverge.
+  if (d.extHours) {
+    int sz = 2;
+    gfx->setTextSize(sz);
+    gfx->setTextColor(C_YELLOW);
+    gfx->setCursor(4, 4);
+    gfx->print(d.extLabel);
+  }
+
   // Range label (top-right; the very bottom row is overscanned on this panel)
   if (s.ticker.showRangeLabel && d.rangeLabel[0]) {
     int sz = 2;

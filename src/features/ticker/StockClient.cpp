@@ -250,6 +250,13 @@ static bool parseYahoo(const Settings& s, StockData& d, Stream& stream) {
   fmeta["currency"]           = true;
   fmeta["shortName"]          = true;
   fmeta["longName"]           = true;
+  fmeta["marketState"]           = true;   // "PRE" | "REGULAR" | "POST" | "POSTPOST" | "CLOSED" | ...
+  fmeta["postMarketPrice"]       = true;
+  fmeta["postMarketChange"]      = true;
+  fmeta["postMarketChangePercent"] = true;
+  fmeta["preMarketPrice"]        = true;
+  fmeta["preMarketChange"]       = true;
+  fmeta["preMarketChangePercent"] = true;
   filter["chart"]["result"][0]["indicators"]["quote"][0]["close"] = true;
 
   JsonDocument doc;
@@ -287,6 +294,35 @@ static bool parseYahoo(const Settings& s, StockData& d, Stream& stream) {
     d.hasChange = true;
   } else {
     d.hasChange = false;
+  }
+
+  // Extended-hours overlay: Yahoo keeps regularMarketPrice pinned to the last
+  // regular-session trade even while pre/post-market trading is live, so a US
+  // stock checked from Korea during the day (US pre/post hours) looked frozen
+  // without this — apps like Toss show the moving extended-hours price instead.
+  d.extHours = false;
+  d.extLabel[0] = 0;
+  const char* mkt = meta["marketState"] | "";
+  bool isPost = !strcmp(mkt, "POST") || !strcmp(mkt, "POSTPOST");
+  bool isPre  = !strcmp(mkt, "PRE") || !strcmp(mkt, "PREPRE");
+  if (isPost && (meta["postMarketPrice"].is<float>() || meta["postMarketPrice"].is<int>())) {
+    d.price = meta["postMarketPrice"].as<float>();
+    if (meta["postMarketChangePercent"].is<float>() || meta["postMarketChangePercent"].is<int>()) {
+      d.changePct = meta["postMarketChangePercent"].as<float>();
+      d.change = meta["postMarketChange"] | (d.price - price);
+      d.hasChange = true;
+    }
+    d.extHours = true;
+    strlcpy(d.extLabel, "AH", sizeof(d.extLabel));
+  } else if (isPre && (meta["preMarketPrice"].is<float>() || meta["preMarketPrice"].is<int>())) {
+    d.price = meta["preMarketPrice"].as<float>();
+    if (meta["preMarketChangePercent"].is<float>() || meta["preMarketChangePercent"].is<int>()) {
+      d.changePct = meta["preMarketChangePercent"].as<float>();
+      d.change = meta["preMarketChange"] | (d.price - price);
+      d.hasChange = true;
+    }
+    d.extHours = true;
+    strlcpy(d.extLabel, "PRE", sizeof(d.extLabel));
   }
 
   String rl = s.ticker.range;
