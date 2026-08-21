@@ -53,7 +53,10 @@ static String buildUrl(const Settings& s) {
 
 // Keep only the fields WeatherMode draws — the full Open-Meteo response also
 // carries units/metadata blocks we don't need on a memory-tight ESP8266.
-static bool parseForecast(Stream& stream) {
+// Takes the whole body as a String (rather than streaming) so that, on an
+// unexpected shape, we can put a snippet of what the server actually sent
+// into g_parseErr instead of just "not what we expected".
+static bool parseForecast(const String& body) {
   JsonDocument filter;
   JsonObject cur = filter["current"].to<JsonObject>();
   cur["temperature_2m"] = true;
@@ -65,13 +68,16 @@ static bool parseForecast(Stream& stream) {
 
   JsonDocument doc;
   DeserializationError err =
-      deserializeJson(doc, stream, DeserializationOption::Filter(filter));
+      deserializeJson(doc, body, DeserializationOption::Filter(filter));
   if (err) { g_parseErr = String("deserialize: ") + err.c_str(); return false; }
 
   JsonObjectConst cu = doc["current"].as<JsonObjectConst>();
-  if (cu.isNull()) { g_parseErr = "no current object"; return false; }
+  if (cu.isNull()) {
+    g_parseErr = "no current object, body starts: " + body.substring(0, 100);
+    return false;
+  }
   if (!(cu["temperature_2m"].is<float>() || cu["temperature_2m"].is<int>())) {
-    g_parseErr = "no current.temperature_2m";
+    g_parseErr = "no current.temperature_2m, body starts: " + body.substring(0, 100);
     return false;
   }
 
@@ -115,9 +121,10 @@ static bool fetchOnce(const Settings& s) {
     http.end();
     return false;
   }
-  bool ok = parseForecast(http.getStream());
-  if (!ok) g_w.lastCode = -800;   // got a 200 but couldn't parse it — different bug class
+  String body = http.getString();
   http.end();
+  bool ok = parseForecast(body);
+  if (!ok) g_w.lastCode = -800;   // got a 200 but couldn't parse it — different bug class
   return ok;
 }
 
