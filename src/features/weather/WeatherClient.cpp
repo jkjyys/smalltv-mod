@@ -89,7 +89,7 @@ static bool fetchOnce(const Settings& s) {
   // TLS needs a contiguous heap chunk; skip rather than reset-loop if too low.
   // Sized for the larger 5120 B fallback buffer above (radar's 18000 assumed a
   // 4096 B buffer) — tune here first if fetches keep failing for lack of heap.
-  if (ESP.getFreeHeap() < 16000) return false;
+  if (ESP.getFreeHeap() < 16000) { g_w.lastCode = -1000; return false; }
   probeTls();
 
   std::unique_ptr<NetClient> client(platformMakeSecureClient(g_tlsRx));
@@ -98,17 +98,19 @@ static bool fetchOnce(const Settings& s) {
   http.setTimeout(s.httpTimeout);
   http.setReuse(false);
   String url = buildUrl(s);
-  if (!http.begin(*client, url)) return false;
+  if (!http.begin(*client, url)) { g_w.lastCode = -900; return false; }
   http.addHeader("Accept", "application/json");
   http.setUserAgent(F(WEATHER_USER_AGENT));
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
 
   int code = http.GET();
+  g_w.lastCode = (int16_t)code;   // diagnostic: surfaced via /api/status
   if (code != HTTP_CODE_OK) {
     http.end();
     return false;
   }
   bool ok = parseForecast(http.getStream());
+  if (!ok) g_w.lastCode = -800;   // got a 200 but couldn't parse it — different bug class
   http.end();
   return ok;
 }

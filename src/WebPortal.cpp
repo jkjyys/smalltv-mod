@@ -8,6 +8,7 @@
 #include "OtaUpdate.h"
 #include "StockClient.h"
 #include "UsageClient.h"
+#include "WeatherClient.h"
 #include "NotifyMode.h"
 #include "Clock.h"
 #include "WgClient.h"
@@ -132,6 +133,20 @@ static void handleStatus() {
         t["basis"] = onRange ? "range" : "day";     // which basis that was
       }
     }
+  }
+#endif
+
+#if WITH_WEATHER
+  {
+    const WeatherNow& w = weatherCurrent();
+    JsonObject wo = o["weather"].to<JsonObject>();
+    wo["valid"] = w.valid;
+    wo["error"] = w.error;
+    wo["lastCode"] = w.lastCode;   // diagnostic: HTTP status, or a negative
+                                   // code (-1000 heap gate, -900 http.begin
+                                   // failed, -800 parsed-but-bad-JSON, other
+                                   // negatives are HTTPClient's own error codes)
+    if (w.valid) { wo["temp"] = w.temp; wo["hi"] = w.hi; wo["lo"] = w.lo; }
   }
 #endif
   sendJson(doc);

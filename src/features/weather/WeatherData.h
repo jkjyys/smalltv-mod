@@ -8,6 +8,9 @@
 struct WeatherNow {
   bool     valid;      // a successful fetch has landed at least once
   bool     error;       // last fetch failed (valid may still be true = stale data)
+  int16_t  lastCode;      // diagnostic: HTTP status of the last attempt, or a
+                          // negative HTTPClient error code (see HTTPClient.h),
+                          // or -1000 if the heap gate skipped the attempt entirely
   // temp/hi/lo arrive already in the unit requested from the API (Settings.weather.fahrenheit
   // picks celsius vs fahrenheit in the request itself, so no conversion happens on-device).
   float    temp;
