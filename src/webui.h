@@ -225,6 +225,7 @@ small.hint{display:block;color:var(--mut);margin-top:4px;font-size:12px}
    <div class="chk"><input id="showChart" type="checkbox"><label>Sparkline chart</label></div>
    <div class="chk"><input id="showRangeLabel" type="checkbox"><label>Timeframe label</label></div>
    <div class="chk"><input id="showUpdatedAgo" type="checkbox"><label>"Updated N s ago"</label></div>
+   <div class="chk"><input id="showKrw" type="checkbox"><label>₩ conversion under a USD price</label></div>
    <div class="chk"><input id="showPageDots" type="checkbox"><label>Rotation dots</label></div>
    <div class="chk"><input id="showPortfolio" type="checkbox"><label>Position P/L &amp; portfolio page</label></div>
   </div>
@@ -396,7 +397,7 @@ document.querySelectorAll('nav button').forEach(function(b){b.onclick=function()
 // field groups by their location in the nested config
 var T_TEXT=['webhookUrl','finnhubKey','range'];                   // ticker strings
 var T_NUM=['rotateSec','pollSec','points'];          // ticker numbers
-var T_BOOL=['showName','showPrice','showChange','showChart','showRangeLabel','showUpdatedAgo','showPageDots','showPortfolio'];
+var T_BOOL=['showName','showPrice','showChange','showChart','showRangeLabel','showUpdatedAgo','showPageDots','showPortfolio','showKrw'];
 
 // IANA -> POSIX TZ. The device stores/uses the POSIX rule; this map lives in the
 // browser so the firmware carries no tz database (same idea as the cash finder).

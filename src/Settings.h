@@ -52,6 +52,7 @@ struct TickerSettings {
   bool showChart;
   bool showRangeLabel;
   bool showUpdatedAgo;
+  bool showKrw;   // secondary "≈ ₩1,234,567" line under a USD price, using the shared USD/KRW rate below
   bool showPageDots;
   bool showPortfolio;   // P/L line on position tickers + portfolio summary page
 

@@ -36,6 +36,7 @@ void TickerSettings::setDefaults() {
   showChart = true;
   showRangeLabel = true;
   showUpdatedAgo = false;
+  showKrw = false;
   showPageDots = true;
   showPortfolio = true;   // only visible once a symbol has qty+cost set
 
@@ -64,6 +65,7 @@ void TickerSettings::toJson(JsonObject o) const {
   o["showChart"]      = showChart;
   o["showRangeLabel"] = showRangeLabel;
   o["showUpdatedAgo"] = showUpdatedAgo;
+  o["showKrw"]        = showKrw;
   o["showPageDots"]   = showPageDots;
   o["showPortfolio"]  = showPortfolio;
 
@@ -101,6 +103,7 @@ void TickerSettings::fromJson(JsonObjectConst o) {
   if (o["showChart"].is<bool>())      showChart = o["showChart"];
   if (o["showRangeLabel"].is<bool>()) showRangeLabel = o["showRangeLabel"];
   if (o["showUpdatedAgo"].is<bool>()) showUpdatedAgo = o["showUpdatedAgo"];
+  if (o["showKrw"].is<bool>())        showKrw = o["showKrw"];
   if (o["showPageDots"].is<bool>())   showPageDots = o["showPageDots"];
   if (o["showPortfolio"].is<bool>())  showPortfolio = o["showPortfolio"];
 

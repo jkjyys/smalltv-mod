@@ -18,6 +18,12 @@ bool             stocksAnyValid();
 // on the poll interval; the web UI shows this next to a failing ticker.
 uint32_t stockRetryInSec(uint8_t i);
 
+// Shared USD/KRW rate for the optional "≈ ₩..." line under a USD price
+// (Settings.ticker.showKrw). One quiet background fetch (Yahoo's KRW=X pair),
+// independent of the configured symbol list — not shown as a ticker itself.
+float fxUsdKrw();                           // 0 = not fetched yet
+void  fxService(const Settings& s);         // call once per TickerMode tick
+
 // Effective change for display. With ticker.changeOnRange it is the move over
 // the charted timeframe (live price vs the first spark point) so the sign
 // agrees with the chart; otherwise (or without chart data) it is the

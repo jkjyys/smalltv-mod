@@ -681,6 +681,32 @@ static uint32_t symbolPeriodMs(const Settings& s, const StockData& d) {
   return back < poll ? back : poll;                          // never slower than a good fetch
 }
 
+// ---------------------------------------------------------------------------
+// Shared USD/KRW rate for Settings.ticker.showKrw (see StockClient.h). Reuses
+// the Yahoo chart plumbing above with a private StockData that is never one
+// of the user's configured symbols — just a place to land KRW=X's price.
+static StockData g_fx;
+static bool      g_fxInited = false;
+static uint32_t  g_fxNextMs = 0;
+
+float fxUsdKrw() { return g_fx.valid ? g_fx.price : 0.0f; }
+
+void fxService(const Settings& s) {
+  if (!s.ticker.showKrw) return;
+  if (g_refreshing) return;   // don't stack a 2nd TLS handshake onto an in-progress symbol refresh this tick
+  if (!g_fxInited) {
+    g_fx.clear();
+    strlcpy(g_fx.symbol, "KRW=X", sizeof(g_fx.symbol));
+    g_fxInited = true;
+    g_fxNextMs = millis();
+  }
+  if ((int32_t)(millis() - g_fxNextMs) < 0) return;
+  g_fxNextMs = millis() + 30UL * 60UL * 1000UL;   // 30 min — a spot rate doesn't need to be fresher
+
+  if (!fetchUrl(s, buildYahooUrl(s, YAHOO_CHART_HOST1, "KRW=X"), PARSE_YAHOO, g_fx))
+    fetchUrl(s, buildYahooUrl(s, YAHOO_CHART_HOST2, "KRW=X"), PARSE_YAHOO, g_fx);   // one mirror retry, same tick's worth of budget as a symbol gets
+}
+
 // True once the symbol's own due time has passed (millis()-safe subtraction).
 static bool symbolDue(const StockData& d) {
   return (int32_t)(millis() - d.nextTryMs) >= 0;

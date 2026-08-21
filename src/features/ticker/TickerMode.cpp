@@ -53,6 +53,22 @@ static void fmtPrice(float v, char* out, size_t n) {
   else                snprintf(out, n, "%.6f", v);
 }
 
+// Comma-groups a non-negative integer for the KRW line ("1234567" -> "1,234,567").
+static void fmtThousands(long v, char* out, size_t n) {
+  char digits[16];
+  snprintf(digits, sizeof(digits), "%ld", v);
+  int len = strlen(digits);
+  int commas = (len - 1) / 3;
+  int outLen = len + commas;
+  if ((size_t)outLen >= n) { strlcpy(out, digits, n); return; }   // shouldn't happen at ticker-price magnitudes
+  out[outLen] = 0;
+  int oi = outLen - 1;
+  for (int i = len - 1, run = 0; i >= 0; i--, run++) {
+    if (run > 0 && run % 3 == 0) out[oi--] = ',';
+    out[oi--] = digits[i];
+  }
+}
+
 // ---- one ticker page ------------------------------------------------------
 static void drawStock(const StockData& d, uint8_t pageIndex, uint8_t pageCount,
                       const Settings& s) {
@@ -111,6 +127,24 @@ static void drawStock(const StockData& d, uint8_t pageIndex, uint8_t pageCount,
     int py = s.ticker.showName ? 74 : 64;
     gfxDrawCentered(line, py, sz, C_WHITE);   // price stays neutral (not trend-colored)
     y = py + ph + 8;
+
+    // Optional "~KRW 1,234,567" line under a USD price, using the shared
+    // background-fetched rate (see StockClient's fxService). Only for USD —
+    // yahooCurrency() marks that case with exactly "$", never any other code.
+    // Plain ASCII text, no ≈/₩ glyphs: the built-in font is ASCII-only, same
+    // reason the Currency ticker itself prints "KRW 1386.43", not a symbol.
+    if (s.ticker.showKrw && !strcmp(d.currency, "$")) {
+      float rate = fxUsdKrw();
+      if (rate > 0) {
+        char won[20];
+        fmtThousands(lroundf(d.price * rate), won, sizeof(won));
+        char kline[26];
+        snprintf(kline, sizeof(kline), "~KRW %s", won);
+        uint8_t ksz = gfxFitSize(kline, 220, 2);
+        gfxDrawCentered(kline, y, ksz, C_GRAY);
+        y += 8 * ksz + 6;
+      }
+    }
   }
 
   // Change line: [arrow] +chg (+pct%)
@@ -352,6 +386,7 @@ void TickerMode::render(const Settings& s) {
 
 void TickerMode::service(const Settings& s) {
   stocksService(s);
+  fxService(s);
 
   uint8_t n = stocksCount();
   uint8_t pages = n + (hasPortfolioPage(s) ? 1 : 0);
