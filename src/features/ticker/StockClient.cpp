@@ -119,6 +119,18 @@ static String buildYahooUrl(const Settings& s, const char* host, const char* sym
   return url;
 }
 
+// v7/finance/quote — see config.h's YAHOO_QUOTE_HOST comment. One extra
+// best-effort fetch, only for the marketState/post/pre fields the v8 chart
+// endpoint above doesn't carry.
+static String buildYahooQuoteUrl(const char* host, const char* symbol) {
+  String url = F("https://");
+  url += host;
+  url += F(YAHOO_QUOTE_PATH);
+  url += F("?symbols=");
+  url += urlEncode(symbol);
+  return url;
+}
+
 // Short, display-safe currency prefix. The built-in bitmap font has no glyphs
 // for symbols like €, so non-USD currencies are shown as their ISO code.
 static void yahooCurrency(const char* code, char* out, size_t n) {
@@ -380,6 +392,64 @@ static bool parseYahoo(const Settings& s, StockData& d, Stream& stream) {
   return true;
 }
 
+// v7/finance/quote overlay — see config.h's YAHOO_QUOTE_HOST comment. Runs
+// AFTER a successful parseYahoo() above, so `d` already has its regular-session
+// price/change/name/spark/currency; this only overwrites the extHours fields
+// if the market is genuinely in a pre/post session right now. Returns false
+// (and leaves `d` untouched) on any failure or if the session is REGULAR/
+// CLOSED — that's not an error, just nothing to overlay.
+static bool applyYahooQuoteExt(StockData& d, Stream& stream) {
+  JsonDocument filter;
+  filter["quoteResponse"]["result"][0]["marketState"] = true;
+  filter["quoteResponse"]["result"][0]["postMarketPrice"] = true;
+  filter["quoteResponse"]["result"][0]["postMarketChange"] = true;
+  filter["quoteResponse"]["result"][0]["postMarketChangePercent"] = true;
+  filter["quoteResponse"]["result"][0]["preMarketPrice"] = true;
+  filter["quoteResponse"]["result"][0]["preMarketChange"] = true;
+  filter["quoteResponse"]["result"][0]["preMarketChangePercent"] = true;
+
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(
+      doc, stream, DeserializationOption::Filter(filter));
+  if (err) return false;
+
+  JsonObjectConst res = doc["quoteResponse"]["result"][0];
+  if (res.isNull()) return false;
+
+  const char* mkt = res["marketState"] | "";
+  strlcpy(d.dbgMarketState, mkt, sizeof(d.dbgMarketState));
+  d.dbgHasPostPrice = !res["postMarketPrice"].isNull();
+  d.dbgHasPrePrice  = !res["preMarketPrice"].isNull();
+
+  bool isPost = !strcmp(mkt, "POST") || !strcmp(mkt, "POSTPOST");
+  bool isPre  = !strcmp(mkt, "PRE") || !strcmp(mkt, "PREPRE");
+  float regularPrice = d.price;   // parseYahoo()'s regular-session price, for a change fallback below
+
+  if (isPost && (res["postMarketPrice"].is<float>() || res["postMarketPrice"].is<int>())) {
+    d.price = res["postMarketPrice"].as<float>();
+    if (res["postMarketChangePercent"].is<float>() || res["postMarketChangePercent"].is<int>()) {
+      d.changePct = res["postMarketChangePercent"].as<float>();
+      d.change = res["postMarketChange"] | (d.price - regularPrice);
+      d.hasChange = true;
+    }
+    d.extHours = true;
+    strlcpy(d.extLabel, "AH", sizeof(d.extLabel));
+    return true;
+  }
+  if (isPre && (res["preMarketPrice"].is<float>() || res["preMarketPrice"].is<int>())) {
+    d.price = res["preMarketPrice"].as<float>();
+    if (res["preMarketChangePercent"].is<float>() || res["preMarketChangePercent"].is<int>()) {
+      d.changePct = res["preMarketChangePercent"].as<float>();
+      d.change = res["preMarketChange"] | (d.price - regularPrice);
+      d.hasChange = true;
+    }
+    d.extHours = true;
+    strlcpy(d.extLabel, "PRE", sizeof(d.extLabel));
+    return true;
+  }
+  return false;   // parsed fine, just not in an extended session right now
+}
+
 // ---- parse: cash.ch quote ---------------------------------------------------
 // {"data":{"quoteList":{"quoteList":{"edges":[{"node":{"lval":"1086.51",
 //  "iNetVperprV":"7.36","perfPercentage":"0.68","mCur":"USD",...}}]}}}}
@@ -530,7 +600,7 @@ static bool parseCashChart(const Settings& s, StockData& d, Stream& stream) {
 }
 
 // ---- one HTTP(S) GET + parse ----------------------------------------------
-enum ParseKind : uint8_t { PARSE_WEBHOOK, PARSE_YAHOO, PARSE_CASH_QUOTE, PARSE_CASH_CHART, PARSE_GITHUB, PARSE_FINNHUB };
+enum ParseKind : uint8_t { PARSE_WEBHOOK, PARSE_YAHOO, PARSE_CASH_QUOTE, PARSE_CASH_CHART, PARSE_GITHUB, PARSE_FINNHUB, PARSE_YAHOO_QUOTE };
 
 // cash.ch is the only host we let negotiate ECDHE, and only the first handshake
 // pays for it: this session resumes the rest for ~23 h.
@@ -610,6 +680,29 @@ static bool fetchUrl(const Settings& s, const String& url, ParseKind kind, Stock
   return ok;
 }
 
+// v7/finance/quote overlay fetch — see config.h's YAHOO_QUOTE_HOST comment
+// and applyYahooQuoteExt() above. Kept as its own small function (rather than
+// routed through fetchUrl()'s generic dispatch) since a miss here is never an
+// error worth setting d.error for — `d` already has a valid regular-session
+// price before this runs.
+static void fetchYahooQuoteExt(const Settings& s, StockData& d) {
+  if (platformMaxFreeBlock() < 16000) return;
+  std::unique_ptr<NetClient> client(platformMakeSecureClient(2048));
+
+  HTTPClient http;
+  http.setTimeout(s.httpTimeout);
+  http.setReuse(false);
+  http.useHTTP10(true);
+  if (!http.begin(*client, buildYahooQuoteUrl(YAHOO_QUOTE_HOST1, d.symbol))) return;
+  http.addHeader("Accept", "application/json");
+  http.setUserAgent(F(YAHOO_USER_AGENT));
+
+  int code = http.GET();
+  if (code != HTTP_CODE_OK) { http.end(); return; }   // 401/403/999 etc: Yahoo blocked it — silently skip
+  applyYahooQuoteExt(d, http.getStream());
+  http.end();
+}
+
 // ---- fetch one symbol, one network request per call -----------------------
 // A symbol may need several requests (Yahoo mirror retry; cash.ch quote, its
 // retry, then the chart). Each is a separate step so only ONE TLS handshake
@@ -622,11 +715,20 @@ static uint8_t g_fetchPhase = 0;
 static bool stepSymbol(const Settings& s, StockData& d) {
   if (d.source == SRC_YAHOO) {
     if (g_fetchPhase == 0) {
-      if (fetchUrl(s, buildYahooUrl(s, YAHOO_CHART_HOST1, d.symbol), PARSE_YAHOO, d)) return true;
+      if (fetchUrl(s, buildYahooUrl(s, YAHOO_CHART_HOST1, d.symbol), PARSE_YAHOO, d)) { g_fetchPhase = 2; return false; }
       g_fetchPhase = 1;                 // transient drop: retry the mirror next tick
       return false;
     }
-    if (!fetchUrl(s, buildYahooUrl(s, YAHOO_CHART_HOST2, d.symbol), PARSE_YAHOO, d)) d.error = true;
+    if (g_fetchPhase == 1) {
+      if (!fetchUrl(s, buildYahooUrl(s, YAHOO_CHART_HOST2, d.symbol), PARSE_YAHOO, d)) { d.error = true; return true; }
+      g_fetchPhase = 2;
+      return false;
+    }
+    // phase 2: best-effort extended-hours overlay (see config.h's
+    // YAHOO_QUOTE_HOST comment) — a separate tick, same one-handshake-per-call
+    // rule as cash.ch's phases above. Failure here is silent and non-fatal:
+    // `d` already has a valid regular-session price from phase 0/1.
+    fetchYahooQuoteExt(s, d);
     return true;
   }
 
