@@ -8,18 +8,21 @@ static const char* CONFIG_PATH = "/config.json";
 // Ticker slice
 // ===========================================================================
 static const char* srcToStr(uint8_t s) {
-  return (s == SRC_YAHOO) ? "yahoo"
-       : (s == SRC_CASH)  ? "cash"
-       : (s == SRC_GHUB)  ? "github" : "webhook";
+  return (s == SRC_YAHOO)   ? "yahoo"
+       : (s == SRC_CASH)    ? "cash"
+       : (s == SRC_GHUB)    ? "github"
+       : (s == SRC_FINNHUB) ? "finnhub" : "webhook";
 }
 static uint8_t srcFromStr(const String& s) {
-  return s.equalsIgnoreCase("yahoo")  ? SRC_YAHOO
-       : s.equalsIgnoreCase("cash")   ? SRC_CASH
-       : s.equalsIgnoreCase("github") ? SRC_GHUB : SRC_WEBHOOK;
+  return s.equalsIgnoreCase("yahoo")   ? SRC_YAHOO
+       : s.equalsIgnoreCase("cash")    ? SRC_CASH
+       : s.equalsIgnoreCase("github")  ? SRC_GHUB
+       : s.equalsIgnoreCase("finnhub") ? SRC_FINNHUB : SRC_WEBHOOK;
 }
 
 void TickerSettings::setDefaults() {
   webhookUrl = "";
+  finnhubKey = "";
   range = DEFAULT_RANGE;
   points = DEFAULT_POINTS;
   pollSec = DEFAULT_POLL_SEC;
@@ -48,6 +51,7 @@ void TickerSettings::setDefaults() {
 
 void TickerSettings::toJson(JsonObject o) const {
   o["webhookUrl"]     = webhookUrl;
+  o["finnhubKey"]     = finnhubKey;
   o["range"]          = range;
   o["points"]         = points;
   o["pollSec"]        = pollSec;
@@ -81,6 +85,7 @@ void TickerSettings::fromJson(JsonObjectConst o) {
   if (o["source"].is<const char*>()) legacySrc = srcFromStr(o["source"].as<String>());
 
   if (o["webhookUrl"].is<const char*>()) webhookUrl = o["webhookUrl"].as<String>();
+  if (o["finnhubKey"].is<const char*>()) finnhubKey = o["finnhubKey"].as<String>();
   if (o["range"].is<const char*>())      range = o["range"].as<String>();
   if (o["points"].is<int>())             points = constrain((int)o["points"], 0, MAX_SPARK_POINTS);
   // Clamped at both ends: these land in a uint16_t, and the web UI's own

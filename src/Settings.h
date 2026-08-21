@@ -37,6 +37,7 @@ struct WifiCred {
 // every symbol whose source is SRC_WEBHOOK.
 struct TickerSettings {
   String   webhookUrl;    // custom webhook base URL (used by webhook symbols)
+  String   finnhubKey;    // shared by every symbol whose source is SRC_FINNHUB — get a free one at finnhub.io
   String   range;         // chart timeframe token (e.g. "1d", "5d", "1mo", "1y")
   uint16_t points;        // sparkline points requested
   uint16_t pollSec;       // refresh period

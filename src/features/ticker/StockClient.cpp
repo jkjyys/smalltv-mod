@@ -168,6 +168,14 @@ static String buildCashChartUrl(const Settings& s, const char* symbol) {
   return buildCashUrl(q);
 }
 
+static String buildFinnhubUrl(const Settings& s, const char* symbol) {
+  String url = F("https://" FINNHUB_HOST FINNHUB_QUOTE_PATH "?symbol=");
+  url += urlEncode(symbol);
+  url += F("&token=");
+  url += urlEncode(s.ticker.finnhubKey.c_str());
+  return url;
+}
+
 // ---- URL builder: GitHub static quotes ------------------------------------
 // The per-symbol file published by the quotes workflow. Same JSON as a webhook.
 static String buildGithubUrl(const char* symbol) {
@@ -427,6 +435,50 @@ static bool parseCashQuote(const Settings& s, StockData& d, Stream& stream) {
   return true;
 }
 
+// ---- parse: Finnhub quote endpoint ------------------------------------------
+// {"c":192.35,"d":1.20,"dp":0.63,"h":193.0,"l":190.1,"o":191.0,"pc":191.15,"t":1699999999}
+// `c` is Finnhub's definition of "current price" — the latest tradable quote,
+// which is the whole point of this source: unlike the Yahoo chart endpoint's
+// regularMarketPrice, it moves during pre/post-market instead of freezing at
+// the last regular-session trade. No sparkline: the free tier's candle
+// endpoint isn't available without a paid plan, so Finnhub symbols show price
+// + change only.
+static bool parseFinnhubQuote(const Settings& s, StockData& d, Stream& stream) {
+  JsonDocument filter;
+  filter["c"] = true;
+  filter["d"] = true;
+  filter["dp"] = true;
+
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(
+      doc, stream, DeserializationOption::Filter(filter));
+  if (err) return false;
+
+  if (!(doc["c"].is<float>() || doc["c"].is<int>())) return false;
+  float price = doc["c"].as<float>();
+  if (isnan(price) || price <= 0) return false;   // Finnhub returns all-zero for an unknown symbol
+  d.price = price;
+
+  if (doc["dp"].is<float>() || doc["dp"].is<int>()) {
+    d.changePct = doc["dp"].as<float>();
+    d.change = doc["d"] | 0.0f;
+    d.hasChange = true;
+  } else {
+    d.hasChange = false;
+  }
+
+  if (!d.userNamed && !d.name[0]) strlcpy(d.name, d.symbol, MAX_NAME_LEN);   // Finnhub's quote has no company name
+
+  String rl = s.ticker.range;
+  rl.toUpperCase();
+  strlcpy(d.rangeLabel, rl.c_str(), sizeof(d.rangeLabel));
+
+  d.valid = true;
+  d.error = false;
+  d.lastOkMs = millis();
+  return true;
+}
+
 // ---- parse: cash.ch daily-close series --------------------------------------
 // {"data":{"integration":{"solid":{"chart":{"timeserie":{"prices":
 //  [{"close":998.45},...]}}}}}} — closes are real JSON numbers here (unlike
@@ -478,7 +530,7 @@ static bool parseCashChart(const Settings& s, StockData& d, Stream& stream) {
 }
 
 // ---- one HTTP(S) GET + parse ----------------------------------------------
-enum ParseKind : uint8_t { PARSE_WEBHOOK, PARSE_YAHOO, PARSE_CASH_QUOTE, PARSE_CASH_CHART, PARSE_GITHUB };
+enum ParseKind : uint8_t { PARSE_WEBHOOK, PARSE_YAHOO, PARSE_CASH_QUOTE, PARSE_CASH_CHART, PARSE_GITHUB, PARSE_FINNHUB };
 
 // cash.ch is the only host we let negotiate ECDHE, and only the first handshake
 // pays for it: this session resumes the rest for ~23 h.
@@ -487,6 +539,7 @@ static TlsSession g_cashSession;
 static bool fetchUrl(const Settings& s, const String& url, ParseKind kind, StockData& d) {
   bool https = url.startsWith("https://");
   bool cash = (kind == PARSE_CASH_QUOTE || kind == PARSE_CASH_CHART);
+  bool finnhub = (kind == PARSE_FINNHUB);
 
   std::unique_ptr<NetClient> client;
   if (https) {
@@ -495,11 +548,19 @@ static bool fetchUrl(const Settings& s, const String& url, ParseKind kind, Stock
     //    and session resumption, and require a large CONTIGUOUS free block up
     //    front so a fragmented heap skips the fetch instead of crashing inside
     //    the handshake. The full cipher list (default) is left on for it.
+    //  - finnhub.io: also needs the full (ECDHE-capable) cipher list — like
+    //    most current API hosts it doesn't offer the cheap static-RSA suites
+    //    the block below relies on. No MFLN assumption or session resumption
+    //    (unlike cash.ch) since we haven't confirmed it honors either; sized
+    //    generously instead.
     //  - Yahoo / GitHub / webhook: forced to the cheap static-RSA suites, so
     //    those handshakes stay as light as the old BASIC build.
     if (cash) {
       if (platformMaxFreeBlock() < 16000) return false;   // largest contiguous block, not total
       client.reset(platformMakeSecureClient(512, &g_cashSession, 512, /*cheapCiphers=*/false));
+    } else if (finnhub) {
+      if (platformMaxFreeBlock() < 16000) return false;
+      client.reset(platformMakeSecureClient(2048, nullptr, 512, /*cheapCiphers=*/false));
     } else {
       // raw.githubusercontent.com sends a ~4 KB cert record and won't negotiate
       // MFLN, so it needs a bigger receive buffer than Yahoo's small records.
@@ -525,6 +586,8 @@ static bool fetchUrl(const Settings& s, const String& url, ParseKind kind, Stock
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   } else if (kind == PARSE_GITHUB) {
     http.setUserAgent(F(FW_NAME));            // GitHub rejects an empty UA
+  } else if (kind == PARSE_FINNHUB) {
+    http.setUserAgent(F(FW_NAME));
   } else if (kind != PARSE_WEBHOOK) {
     http.setUserAgent(F(CASH_USER_AGENT));    // cash.ch requires none; sent to be identifiable
   }
@@ -540,6 +603,7 @@ static bool fetchUrl(const Settings& s, const String& url, ParseKind kind, Stock
     case PARSE_YAHOO:      ok = parseYahoo(s, d, http.getStream());     break;
     case PARSE_CASH_QUOTE: ok = parseCashQuote(s, d, http.getStream()); break;
     case PARSE_CASH_CHART: ok = parseCashChart(s, d, http.getStream()); break;
+    case PARSE_FINNHUB:    ok = parseFinnhubQuote(s, d, http.getStream()); break;
     default:               ok = parseWebhook(s, d, http.getStream());   break;  // webhook + github: same JSON
   }
   http.end();
@@ -589,6 +653,12 @@ static bool stepSymbol(const Settings& s, StockData& d) {
 
   if (d.source == SRC_GHUB) {           // static per-symbol JSON from the repo
     if (!fetchUrl(s, buildGithubUrl(d.symbol), PARSE_GITHUB, d)) d.error = true;
+    return true;
+  }
+
+  if (d.source == SRC_FINNHUB) {
+    if (s.ticker.finnhubKey.length() < 4) { d.error = true; return true; }   // no key set yet
+    if (!fetchUrl(s, buildFinnhubUrl(s, d.symbol), PARSE_FINNHUB, d)) d.error = true;
     return true;
   }
 

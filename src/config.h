@@ -138,6 +138,7 @@
 #define SRC_YAHOO    1
 #define SRC_CASH     2
 #define SRC_GHUB     3   // static JSON read from a repo's data branch (see below)
+#define SRC_FINNHUB  4   // finnhub.io quote endpoint — needs a free API key, reflects pre/post-market
 #define DEFAULT_SOURCE  SRC_YAHOO            // works out of the box, no server
 
 // Yahoo Finance public chart endpoint. A browser-like User-Agent is required —
@@ -149,6 +150,16 @@
 #define YAHOO_CHART_HOST2 "query2.finance.yahoo.com"
 #define YAHOO_CHART_PATH  "/v8/finance/chart/"
 #define YAHOO_USER_AGENT  "Mozilla/5.0 (SmallTV)"
+
+// Finnhub quote endpoint (SRC_FINNHUB). One plain GET per symbol, a ~120 B
+// JSON reply: current price (c), day change (d) and % (dp), day high/low (h/l),
+// previous close (pc). Free tier: sign up at finnhub.io for a token, paste it
+// into the Ticker tab. Unlike the Yahoo chart endpoint above, Finnhub's `c`
+// reflects the latest tradable price including pre/post-market, at the cost of
+// needing an account. No sparkline here — the free tier's candle endpoint is
+// paid-only, so a Finnhub symbol shows price + change only, no chart.
+#define FINNHUB_HOST       "finnhub.io"
+#define FINNHUB_QUOTE_PATH "/api/v1/quote"
 
 // cash.ch public GraphQL endpoint. The device sends two small hand-written
 // GraphQL queries per symbol as plain GETs (?query=...): a ~200 B quote and a

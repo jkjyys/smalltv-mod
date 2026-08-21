@@ -210,6 +210,9 @@ small.hint{display:block;color:var(--mut);margin-top:4px;font-size:12px}
    <small class="hint">Chart timeframe: the change, arrow, colors, and chart cover the same span, so they agree. Needs chart data (2+ points); without it the device falls back to the 1-day change. At 1 day it measures from the session's first data point, so overnight gaps are not counted. 1 day: the classic change vs the previous close, which can point the other way than a longer chart.</small>
    <label>Webhook URL <span class="muted">(only for tickers set to Webhook)</span></label>
    <input id="webhookUrl" type="url" placeholder="http://n8n.local:5678/webhook/stock">
+   <label>Finnhub API key <span class="muted">(only for tickers set to Finnhub)</span></label>
+   <input id="finnhubKey" type="text" placeholder="get a free one at finnhub.io">
+   <small class="hint">Finnhub reflects pre/post-market prices (badged AH/PRE on screen) instead of freezing at the last regular-session trade like Yahoo Finance does — but needs a free account, and has no sparkline on the free tier.</small>
   </div>
   <div class="card"><h2>Color scheme</h2>
    <select id="colorInverted"><option value="false">Green up / Red down</option>
@@ -380,7 +383,7 @@ document.querySelectorAll('nav button').forEach(function(b){b.onclick=function()
 }});
 
 // field groups by their location in the nested config
-var T_TEXT=['webhookUrl','range'];                   // ticker strings
+var T_TEXT=['webhookUrl','finnhubKey','range'];                   // ticker strings
 var T_NUM=['rotateSec','pollSec','points'];          // ticker numbers
 var T_BOOL=['showName','showPrice','showChange','showChart','showRangeLabel','showUpdatedAgo','showPageDots','showPortfolio'];
 
@@ -664,7 +667,7 @@ function addRow(o){var t=$('symTable');var tr=document.createElement('tr');tr.cl
  tr.innerHTML='<td style="width:24%"><input class="s" type="text" placeholder="AAPL" value="'+esc(o.symbol||'')+'"></td>'+
   '<td><input class="n" type="text" placeholder="name" value="'+esc(o.name||'')+'"></td>'+
   '<td style="width:118px"><select class="src" onchange="symHintFor(this.value)">'+
-   '<option value="yahoo">Yahoo Finance</option><option value="cash">cash.ch</option><option value="github">GitHub</option><option value="webhook">Webhook</option></select></td>'+
+   '<option value="yahoo">Yahoo Finance</option><option value="cash">cash.ch</option><option value="github">GitHub</option><option value="finnhub">Finnhub</option><option value="webhook">Webhook</option></select></td>'+
   '<td style="width:58px"><input class="q" type="number" step="any" min="0" placeholder="qty" value="'+(o.qty>0?o.qty:'')+'"></td>'+
   '<td style="width:70px"><input class="c" type="number" step="any" min="0" placeholder="cost" value="'+(o.cost>0?o.cost:'')+'"></td>'+
   '<td style="width:34px"><button class="btn sec" style="padding:6px 10px" onclick="this.closest(\'tr\').remove()">&times;</button></td>';
