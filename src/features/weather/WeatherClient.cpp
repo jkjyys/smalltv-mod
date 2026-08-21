@@ -44,7 +44,7 @@ static String buildUrl(const Settings& s) {
   u += String(s.weather.lat, 4);
   u += F("&longitude=");
   u += String(s.weather.lon, 4);
-  u += F("&current=temperature_2m,weather_code,is_day");
+  u += F("&current=temperature_2m,weather_code,is_day,relative_humidity_2m");
   u += F("&daily=temperature_2m_max,temperature_2m_min");
   u += F("&forecast_days=1&timezone=auto&temperature_unit=");
   u += s.weather.fahrenheit ? F("fahrenheit") : F("celsius");
@@ -62,6 +62,7 @@ static bool parseForecast(const String& body) {
   cur["temperature_2m"] = true;
   cur["weather_code"]   = true;
   cur["is_day"]         = true;
+  cur["relative_humidity_2m"] = true;
   JsonObject day = filter["daily"].to<JsonObject>();
   day["temperature_2m_max"] = true;
   day["temperature_2m_min"] = true;
@@ -84,6 +85,7 @@ static bool parseForecast(const String& body) {
   g_w.temp   = cu["temperature_2m"].as<float>();
   g_w.code   = cu["weather_code"] | 0;
   g_w.isDay  = (cu["is_day"] | 1) != 0;
+  g_w.humidity = cu["relative_humidity_2m"] | 0.0f;   // 0 if the API omitted it — not distinguishable from "0%", but harmless
 
   JsonArrayConst hiArr = doc["daily"]["temperature_2m_max"].as<JsonArrayConst>();
   JsonArrayConst loArr = doc["daily"]["temperature_2m_min"].as<JsonArrayConst>();

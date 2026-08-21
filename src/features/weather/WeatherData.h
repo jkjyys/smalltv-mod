@@ -16,6 +16,7 @@ struct WeatherNow {
   // picks celsius vs fahrenheit in the request itself, so no conversion happens on-device).
   float    temp;
   float    hi, lo;       // today's forecast high/low
+  float    humidity;      // relative humidity, % (0 if the API didn't return it)
   int16_t  code;          // WMO weather code
   bool     isDay;
   uint32_t lastOkMs;

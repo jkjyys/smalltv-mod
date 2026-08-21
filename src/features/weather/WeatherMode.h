@@ -23,6 +23,7 @@ class WeatherMode : public DisplayMode {
 
   uint32_t renderedLastOk_ = 0xFFFFFFFF;
   bool     renderedError_  = false;
+  int8_t   renderedMin_    = -1;   // last clock minute we painted, so the face ticks over
   bool     needRender_     = true;
 };
 
