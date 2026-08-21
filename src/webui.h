@@ -301,6 +301,17 @@ small.hint{display:block;color:var(--mut);margin-top:4px;font-size:12px}
 
  <!-- WEATHER (feature) -->
  <section id="weather" class="tab">
+  <div class="card"><h2>Data source</h2>
+   <select id="weatherSource">
+    <option value="openmeteo">Open-Meteo (forecast model, no key needed)</option>
+    <option value="owm">OpenWeatherMap (nearest station, needs a free key)</option>
+   </select>
+   <div id="owmKeyRow">
+    <label>OpenWeatherMap API key</label>
+    <input id="weatherOwmKey" type="text" placeholder="get a free one at openweathermap.org">
+   </div>
+   <small class="hint">Open-Meteo reads from a forecast model, so it can be a few degrees off from what your phone shows — a real difference in what the number <i>means</i>, not a bug. OpenWeatherMap reads the nearest weather station instead, closer to a phone's own weather app (and what GeekMagic's stock firmware used), but needs a free account.</small>
+  </div>
   <div class="card"><h2>Location</h2>
    <div class="row">
     <div><label>Latitude</label><input id="weatherLat" type="number" step="0.0001" placeholder="37.5665"></div>
@@ -316,7 +327,7 @@ small.hint{display:block;color:var(--mut);margin-top:4px;font-size:12px}
      <select id="weatherFahrenheit"><option value="false">Celsius</option><option value="true">Fahrenheit</option></select></div>
     <div><label>Refresh (s)</label><input id="weatherPollSec" type="number" min="60" max="3600"></div>
    </div>
-   <small class="hint">Data comes from <b>Open-Meteo</b> — free, no account or API key. A home forecast doesn't need to refresh often; every 10 minutes (600s) is the default.</small>
+   <small class="hint">A home forecast doesn't need to refresh often; every 10 minutes (600s) is the default.</small>
   </div>
  </section>
 
@@ -508,6 +519,8 @@ function loadConfig(){return j('/api/config').then(function(c){C=c;
  sv('weatherLat',we.lat); sv('weatherLon',we.lon); sv('weatherPlace',we.place);
  sv('weatherFahrenheit',we.fahrenheit?'true':'false');
  sv('weatherPollSec',we.pollSec||600);
+ sv('weatherSource',we.source==='owm'?'owm':'openmeteo');
+ sv('weatherOwmKey',we.owmKey);
  var au=c.auth||{};
  sc('authEnabled',!!au.enabled); sv('authUser',au.user||'admin');
  var apw=$('authPass'); if(apw){apw.value='';apw.placeholder=au.passSet?'(unchanged)':'set a password';}
@@ -631,7 +644,8 @@ function collect(){
  if($('weather')){
   o.weather={lat:parseFloat(gv('weatherLat'))||0, lon:parseFloat(gv('weatherLon'))||0,
    place:gv('weatherPlace'), fahrenheit:gv('weatherFahrenheit')==='true',
-   pollSec:parseInt(gv('weatherPollSec'))||600};
+   pollSec:parseInt(gv('weatherPollSec'))||600,
+   source:gv('weatherSource'), owmKey:gv('weatherOwmKey')};
  }
  return o;
 }

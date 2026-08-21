@@ -220,15 +220,29 @@
 
 // ---------------------------------------------------------------------------
 // Weather (MODE_WEATHER)
-// Open-Meteo forecast endpoint: free, no API key, no account. One HTTPS GET
-// returns current conditions plus today's high/low for the given lat/lon.
-// Full path built in WeatherClient.cpp: /v1/forecast?latitude=..&longitude=..
-// &current=temperature_2m,weather_code,is_day&daily=temperature_2m_max,
-// temperature_2m_min&timezone=auto&temperature_unit=celsius|fahrenheit
+//   0 = Open-Meteo: forecast-model data (grid interpolation), free, no API key
+//   1 = OpenWeatherMap: nearest observation-station data, needs a free API key
+// Open-Meteo can read several degrees off from what a phone shows, since a
+// phone's weather app is usually observation-based, not model-based — a real
+// difference in what the two numbers *mean*, not a bug in either one. OWM's
+// "current weather" endpoint is observation-based like the phone, and is also
+// what GeekMagic's own stock firmware used (via a city ID lookup).
+// Full path built in WeatherClient.cpp:
+//   Open-Meteo: /v1/forecast?latitude=..&longitude=..&current=temperature_2m,
+//     weather_code,is_day,relative_humidity_2m&daily=temperature_2m_max,
+//     temperature_2m_min&timezone=auto&temperature_unit=celsius|fahrenheit
+//   OpenWeatherMap: /data/2.5/weather?lat=..&lon=..&units=metric|imperial&appid=..
 // ---------------------------------------------------------------------------
+#define WSRC_OPENMETEO 0
+#define WSRC_OWM       1
+#define DEFAULT_WEATHER_SOURCE  WSRC_OPENMETEO
+
 #define WEATHER_HOST        "api.open-meteo.com"
 #define WEATHER_PATH        "/v1/forecast"
 #define WEATHER_USER_AGENT  "Mozilla/5.0 (SmallTV)"
+
+#define OWM_HOST        "api.openweathermap.org"
+#define OWM_PATH        "/data/2.5/weather"
 
 #define DEFAULT_WEATHER_LAT       0.0f
 #define DEFAULT_WEATHER_LON       0.0f

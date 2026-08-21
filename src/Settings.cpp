@@ -382,6 +382,8 @@ void RadarSettings::fromJson(JsonObjectConst o) {
 // Weather slice
 // ===========================================================================
 void WeatherSettings::setDefaults() {
+  source = DEFAULT_WEATHER_SOURCE;
+  owmKey = "";
   lat = DEFAULT_WEATHER_LAT;
   lon = DEFAULT_WEATHER_LON;
   place = "";
@@ -390,6 +392,8 @@ void WeatherSettings::setDefaults() {
 }
 
 void WeatherSettings::toJson(JsonObject o) const {
+  o["source"]     = (source == WSRC_OWM) ? "owm" : "openmeteo";
+  o["owmKey"]     = owmKey;
   o["lat"]        = lat;
   o["lon"]        = lon;
   o["place"]      = place;
@@ -398,6 +402,9 @@ void WeatherSettings::toJson(JsonObject o) const {
 }
 
 void WeatherSettings::fromJson(JsonObjectConst o) {
+  if (o["source"].is<const char*>())
+    source = String(o["source"].as<const char*>()).equalsIgnoreCase("owm") ? WSRC_OWM : WSRC_OPENMETEO;
+  if (o["owmKey"].is<const char*>()) owmKey = o["owmKey"].as<String>();
   if (o["lat"].is<float>() || o["lat"].is<int>()) lat = o["lat"].as<float>();
   if (o["lon"].is<float>() || o["lon"].is<int>()) lon = o["lon"].as<float>();
   if (o["place"].is<const char*>()) place = o["place"].as<String>();

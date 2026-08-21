@@ -164,6 +164,8 @@ struct RadarSettings {
 
 // ---- Weather feature slice --------------------------------------------------
 struct WeatherSettings {
+  uint8_t  source;        // WSRC_* (see config.h) — Open-Meteo (default) or OpenWeatherMap
+  String   owmKey;        // OpenWeatherMap API key (only used when source == WSRC_OWM)
   float    lat;           // location latitude  (0,0 = not set yet)
   float    lon;           // location longitude
   String   place;         // free-text label shown on screen (e.g. "Seoul")
