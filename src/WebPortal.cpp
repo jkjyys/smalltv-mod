@@ -124,6 +124,7 @@ static void handleStatus() {
     t["valid"] = d.valid;
     t["error"] = d.error;
     if (d.error) t["retryIn"] = stockRetryInSec(i);   // seconds to the next attempt
+    t["dbgLastHttpCode"] = d.dbgLastHttpCode;   // shown even on error — this IS the diagnostic for a fetch error
     if (d.valid) {
       t["price"] = d.price;
       if (d.extHours) t["extHours"] = d.extLabel;
