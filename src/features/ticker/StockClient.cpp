@@ -251,6 +251,29 @@ static String buildBinanceUrl(const char* symbol) {
   return url;
 }
 
+// Interval for the sparkline, matching yahooInterval's spirit (finer-grained
+// for a shorter range) but with Binance's own interval vocabulary.
+static const char* binanceInterval(const String& r) {
+  if (r == "1d")  return "15m";
+  if (r == "5d")  return "1h";
+  if (r == "1mo" || r == "3mo" || r == "6mo" || r == "ytd") return "1d";
+  if (r == "1y"  || r == "2y")  return "1d";
+  if (r == "5y"  || r == "10y" || r == "max") return "1w";
+  return "1d";
+}
+
+static String buildBinanceKlinesUrl(const Settings& s, const char* symbol) {
+  String range = s.ticker.range;
+  range.toLowerCase();
+  if (range.length() == 0) range = "1d";
+  String url = F("https://" BINANCE_HOST "/fapi/v1/klines?symbol=");
+  url += urlEncode(symbol);
+  url += F("&interval=");
+  url += binanceInterval(range);
+  url += F("&limit=48");   // matches MAX_SPARK_POINTS' rough magnitude elsewhere
+  return url;
+}
+
 // ---- URL builder: GitHub static quotes ------------------------------------
 // The per-symbol file published by the quotes workflow. Same JSON as a webhook.
 static String buildGithubUrl(const char* symbol) {
@@ -656,6 +679,41 @@ static bool parseBinanceQuote(const Settings& s, StockData& d, Stream& stream) {
   return true;
 }
 
+// Binance /fapi/v1/klines — each candle is a 12-element array; we only want
+// index 4 (close price, as a string, same as the quote endpoint). Filtering
+// an array-of-arrays down to one column per row this way keeps the parsed
+// size to roughly one float per candle instead of the whole OHLCV row.
+// (Whether the filtered result keeps that field at its original index 4 or
+// compacts to index 0 isn't documented either way, so the loop below just
+// takes whichever single string value survived the filter.)
+static bool parseBinanceKlines(StockData& d, Stream& stream) {
+  JsonDocument filter;
+  JsonArray outer = filter.to<JsonArray>();
+  JsonArray tmpl = outer.add<JsonArray>();
+  for (int i = 0; i < 4; i++) tmpl.add(false);
+  tmpl.add(true);   // index 4 = close
+
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(
+      doc, stream, DeserializationOption::Filter(filter));
+  if (err) return false;
+
+  JsonArrayConst arr = doc.as<JsonArrayConst>();
+  if (arr.isNull()) return false;
+
+  d.sparkCount = 0;
+  for (JsonArrayConst k : arr) {
+    if (d.sparkCount >= MAX_SPARK_POINTS) break;
+    const char* close = nullptr;
+    for (JsonVariantConst v : k) {
+      if (v.is<const char*>()) { close = v.as<const char*>(); break; }
+    }
+    if (!close || !close[0]) continue;
+    d.spark[d.sparkCount++] = atof(close);
+  }
+  return d.sparkCount > 0;
+}
+
 // ---- parse: cash.ch daily-close series --------------------------------------
 // {"data":{"integration":{"solid":{"chart":{"timeserie":{"prices":
 //  [{"close":998.45},...]}}}}}} — closes are real JSON numbers here (unlike
@@ -707,7 +765,7 @@ static bool parseCashChart(const Settings& s, StockData& d, Stream& stream) {
 }
 
 // ---- one HTTP(S) GET + parse ----------------------------------------------
-enum ParseKind : uint8_t { PARSE_WEBHOOK, PARSE_YAHOO, PARSE_CASH_QUOTE, PARSE_CASH_CHART, PARSE_GITHUB, PARSE_FINNHUB, PARSE_YAHOO_QUOTE, PARSE_BINANCE };
+enum ParseKind : uint8_t { PARSE_WEBHOOK, PARSE_YAHOO, PARSE_CASH_QUOTE, PARSE_CASH_CHART, PARSE_GITHUB, PARSE_FINNHUB, PARSE_YAHOO_QUOTE, PARSE_BINANCE, PARSE_BINANCE_KLINES };
 
 // cash.ch is the only host we let negotiate ECDHE, and only the first handshake
 // pays for it: this session resumes the rest for ~23 h.
@@ -717,7 +775,7 @@ static bool fetchUrl(const Settings& s, const String& url, ParseKind kind, Stock
   bool https = url.startsWith("https://");
   bool cash = (kind == PARSE_CASH_QUOTE || kind == PARSE_CASH_CHART);
   bool finnhub = (kind == PARSE_FINNHUB);
-  bool binance = (kind == PARSE_BINANCE);
+  bool binance = (kind == PARSE_BINANCE || kind == PARSE_BINANCE_KLINES);
 
   std::unique_ptr<NetClient> client;
   if (https) {
@@ -769,6 +827,8 @@ static bool fetchUrl(const Settings& s, const String& url, ParseKind kind, Stock
     http.setUserAgent(F(FW_NAME));
   } else if (kind == PARSE_BINANCE) {
     http.setUserAgent(F(FW_NAME));
+  } else if (kind == PARSE_BINANCE_KLINES) {
+    http.setUserAgent(F(FW_NAME));
   } else if (kind != PARSE_WEBHOOK) {
     http.setUserAgent(F(CASH_USER_AGENT));    // cash.ch requires none; sent to be identifiable
   }
@@ -787,6 +847,7 @@ static bool fetchUrl(const Settings& s, const String& url, ParseKind kind, Stock
     case PARSE_CASH_CHART: ok = parseCashChart(s, d, http.getStream()); break;
     case PARSE_FINNHUB:    ok = parseFinnhubQuote(s, d, http.getStream()); break;
     case PARSE_BINANCE:    ok = parseBinanceQuote(s, d, http.getStream()); break;
+    case PARSE_BINANCE_KLINES: ok = parseBinanceKlines(d, http.getStream()); break;
     default:               ok = parseWebhook(s, d, http.getStream());   break;  // webhook + github: same JSON
   }
   if (!ok) d.dbgLastHttpCode = -800;   // 200 OK but the body didn't parse the way this source expects
@@ -908,7 +969,16 @@ static bool stepSymbol(const Settings& s, StockData& d) {
   }
 
   if (d.source == SRC_BINANCE) {
-    if (!fetchUrl(s, buildBinanceUrl(d.symbol), PARSE_BINANCE, d)) d.error = true;
+    if (g_fetchPhase == 0) {
+      if (!fetchUrl(s, buildBinanceUrl(d.symbol), PARSE_BINANCE, d)) { d.error = true; return true; }
+      g_fetchPhase = 1;
+      return false;
+    }
+    // phase 1: sparkline; failure is non-fatal (no chart beats none, same as
+    // cash.ch's phase 2 above), and skipped entirely when nothing would show
+    // it — a Binance TLS request isn't free on this chip.
+    if (s.ticker.showChart && s.ticker.points >= 2)
+      fetchUrl(s, buildBinanceKlinesUrl(s, d.symbol), PARSE_BINANCE_KLINES, d);
     return true;
   }
 
