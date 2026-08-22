@@ -56,6 +56,7 @@ struct TickerSettings {
   bool showRangeLabel;
   bool showUpdatedAgo;
   bool showKrw;   // secondary "≈ ₩1,234,567" line under a USD price, using the shared USD/KRW rate below
+  bool showSource;  // small "YAHOO"/"BINANCE"/etc label, bottom-right — which source this symbol is showing right now
   bool showPageDots;
   bool showPortfolio;   // P/L line on position tickers + portfolio summary page
 

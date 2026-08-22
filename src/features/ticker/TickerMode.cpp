@@ -226,6 +226,26 @@ static void drawStock(const StockData& d, uint8_t pageIndex, uint8_t pageCount,
     gfx->print(buf);
   }
 
+  // Data source label (bottom-right) — which provider this symbol's numbers
+  // came from just now. Mainly useful for a symbol whose source can change
+  // mid-session (a Yahoo ticker with an altSymbol handing off to Binance);
+  // for a fixed single-source ticker it's the same word every time, which is
+  // still handy for a settings-page memory jog, so it's shown for any source
+  // when the toggle is on, not just the ones that switch.
+  if (s.ticker.showSource) {
+    const char* src = (d.source == SRC_YAHOO)   ? "YAHOO"
+                     : (d.source == SRC_CASH)    ? "CASH.CH"
+                     : (d.source == SRC_GHUB)    ? "GITHUB"
+                     : (d.source == SRC_FINNHUB) ? "FINNHUB"
+                     : (d.source == SRC_BINANCE) ? "BINANCE" : "WEBHOOK";
+    int sz = 1;
+    int tw = gfxTextW(src, sz);
+    gfx->setTextSize(sz);
+    gfx->setTextColor(C_DGRAY);
+    gfx->setCursor(TFT_WIDTH - tw - 4, 232);
+    gfx->print(src);
+  }
+
   // Stale/error dot (top-left) when last refresh failed but we have old data.
   // (Top-right now holds the range label.)
   if (d.error) gfx->fillCircle(6, 6, 3, C_RED);
