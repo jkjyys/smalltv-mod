@@ -11,13 +11,15 @@ static const char* srcToStr(uint8_t s) {
   return (s == SRC_YAHOO)   ? "yahoo"
        : (s == SRC_CASH)    ? "cash"
        : (s == SRC_GHUB)    ? "github"
-       : (s == SRC_FINNHUB) ? "finnhub" : "webhook";
+       : (s == SRC_FINNHUB) ? "finnhub"
+       : (s == SRC_BINANCE) ? "binance" : "webhook";
 }
 static uint8_t srcFromStr(const String& s) {
   return s.equalsIgnoreCase("yahoo")   ? SRC_YAHOO
        : s.equalsIgnoreCase("cash")    ? SRC_CASH
        : s.equalsIgnoreCase("github")  ? SRC_GHUB
-       : s.equalsIgnoreCase("finnhub") ? SRC_FINNHUB : SRC_WEBHOOK;
+       : s.equalsIgnoreCase("finnhub") ? SRC_FINNHUB
+       : s.equalsIgnoreCase("binance") ? SRC_BINANCE : SRC_WEBHOOK;
 }
 
 void TickerSettings::setDefaults() {
@@ -47,6 +49,7 @@ void TickerSettings::setDefaults() {
     symbols[i].source = DEFAULT_SOURCE;
     symbols[i].qty = 0;
     symbols[i].cost = 0;
+    symbols[i].altSymbol[0] = 0;
   }
 }
 
@@ -77,6 +80,7 @@ void TickerSettings::toJson(JsonObject o) const {
     e["source"] = srcToStr(symbols[i].source);
     e["qty"]    = symbols[i].qty;
     e["cost"]   = symbols[i].cost;
+    e["altSymbol"] = symbols[i].altSymbol;
   }
 }
 
@@ -121,6 +125,7 @@ void TickerSettings::fromJson(JsonObjectConst o) {
                      ? srcFromStr(e["source"].as<String>()) : legacySrc;
       dst.qty  = e["qty"].as<float>();     // absent -> 0
       dst.cost = e["cost"].as<float>();
+      strlcpy(dst.altSymbol, e["altSymbol"] | "", MAX_SYMBOL_LEN);
       if (dst.qty < 0)  dst.qty = 0;
       if (dst.cost < 0) dst.cost = 0;
       symbolCount++;

@@ -2,6 +2,59 @@
 #include "Platform.h"
 #include <ArduinoJson.h>
 #include <math.h>
+#include <time.h>
+
+// ---------------------------------------------------------------------------
+// US market hours (for SymbolCfg.altSymbol — see config.h's BINANCE_HOST
+// comment). Computed straight from UTC + a hand-rolled US DST rule, entirely
+// independent of the device's own display timezone: NYSE/Nasdaq regular
+// session is 9:30-16:00 America/New_York, Mon-Fri, DST 2nd-Sunday-March to
+// 1st-Sunday-November. Doesn't know about market holidays — on a holiday this
+// says "open" when it isn't, so a symbol with altSymbol set would show its
+// Yahoo price frozen at the prior close instead of switching to Binance. A
+// known, acceptable gap: holidays are a handful of days a year, and the
+// symptom (a frozen-looking price) is the same one this feature exists to
+// reduce, not a new failure mode.
+static int8_t nthSundayOfMonth(int year, int month /*1-12*/, int n) {
+  struct tm t = {};
+  t.tm_year = year - 1900;
+  t.tm_mon = month - 1;
+  t.tm_mday = 1;
+  time_t tt = mktime(&t);       // normalizes tm_wday for the 1st of the month
+  gmtime_r(&tt, &t);
+  int firstSunday = 1 + ((7 - t.tm_wday) % 7);
+  return firstSunday + 7 * (n - 1);
+}
+
+static bool usEasternIsDST(const struct tm& utc) {
+  int y = utc.tm_year + 1900;
+  int marchSun2 = nthSundayOfMonth(y, 3, 2);
+  int novSun1   = nthSundayOfMonth(y, 11, 1);
+  // Transitions are 2am ET (07:00 UTC in EST, 06:00 UTC in EDT) — a day-level
+  // compare is precise enough here; the 1h edge case only matters in the hour
+  // of the transition itself.
+  if (utc.tm_mon + 1 < 3 || utc.tm_mon + 1 > 11) return false;
+  if (utc.tm_mon + 1 > 3 && utc.tm_mon + 1 < 11) return true;
+  if (utc.tm_mon + 1 == 3)  return utc.tm_mday >= marchSun2;
+  /* November */            return utc.tm_mday < novSun1;
+}
+
+static bool usMarketRegularHoursNow() {
+  time_t now = time(nullptr);
+  if (now < 1700000000) return true;   // clock not synced yet — assume open, so a symbol just falls back to its normal Yahoo path instead of guessing wrong
+  struct tm utc;
+  gmtime_r(&now, &utc);
+  int offsetHours = usEasternIsDST(utc) ? -4 : -5;
+
+  time_t etNow = now + (time_t)offsetHours * 3600;
+  struct tm et;
+  gmtime_r(&etNow, &et);   // "UTC" broken-down fields of a shifted epoch = ET wall-clock fields
+
+  if (et.tm_wday == 0 || et.tm_wday == 6) return false;   // weekend
+  int minutesIntoDay = et.tm_hour * 60 + et.tm_min;
+  return minutesIntoDay >= (9 * 60 + 30) && minutesIntoDay < (16 * 60);
+}
+
 
 static StockData g_stocks[MAX_SYMBOLS];
 static uint8_t   g_count = 0;
@@ -18,6 +71,7 @@ void stocksInit(const Settings& s) {
     g_stocks[i].source = s.ticker.symbols[i].source;
     g_stocks[i].qty  = s.ticker.symbols[i].qty;
     g_stocks[i].cost = s.ticker.symbols[i].cost;
+    strlcpy(g_stocks[i].altSymbol, s.ticker.symbols[i].altSymbol, MAX_SYMBOL_LEN);
     g_stocks[i].userNamed = (s.ticker.symbols[i].name[0] != 0);
     strlcpy(g_stocks[i].name,
             g_stocks[i].userNamed ? s.ticker.symbols[i].name : s.ticker.symbols[i].symbol,
@@ -188,6 +242,12 @@ static String buildFinnhubUrl(const Settings& s, const char* symbol) {
   return url;
 }
 
+static String buildBinanceUrl(const char* symbol) {
+  String url = F("https://" BINANCE_HOST BINANCE_TICKER_PATH "?symbol=");
+  url += urlEncode(symbol);
+  return url;
+}
+
 // ---- URL builder: GitHub static quotes ------------------------------------
 // The per-symbol file published by the quotes workflow. Same JSON as a webhook.
 static String buildGithubUrl(const char* symbol) {
@@ -278,6 +338,7 @@ static bool parseYahoo(const Settings& s, StockData& d, Stream& stream) {
   fmeta["preMarketPrice"]        = true;
   fmeta["preMarketChange"]       = true;
   fmeta["preMarketChangePercent"] = true;
+  fmeta["regularMarketTime"]     = true;   // Unix seconds of the last regular-session price — used for the holiday check below
   filter["chart"]["result"][0]["indicators"]["quote"][0]["close"] = true;
 
   JsonDocument doc;
@@ -296,6 +357,7 @@ static bool parseYahoo(const Settings& s, StockData& d, Stream& stream) {
   d.price = price;
 
   yahooCurrency(meta["currency"] | "", d.currency, sizeof(d.currency));
+  d.regularMarketTime = meta["regularMarketTime"] | 0;
 
   if (!d.userNamed) {
     const char* nm = meta["shortName"] | (meta["longName"] | (const char*)d.symbol);
@@ -549,6 +611,48 @@ static bool parseFinnhubQuote(const Settings& s, StockData& d, Stream& stream) {
   return true;
 }
 
+// Binance /fapi/v1/ticker/24hr — all the numeric fields arrive as JSON
+// *strings* (Binance convention across their whole API), same as cash.ch
+// above: read as text and atof(), not as numbers.
+static bool parseBinanceQuote(const Settings& s, StockData& d, Stream& stream) {
+  JsonDocument filter;
+  filter["lastPrice"] = true;
+  filter["priceChange"] = true;
+  filter["priceChangePercent"] = true;
+
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(
+      doc, stream, DeserializationOption::Filter(filter));
+  if (err) return false;
+
+  const char* lp = doc["lastPrice"] | "";
+  if (!lp[0]) return false;   // e.g. {"code":-1121,"msg":"Invalid symbol."} for a typo'd symbol
+  float price = atof(lp);
+  if (isnan(price) || price <= 0) return false;
+  d.price = price;
+
+  const char* pct = doc["priceChangePercent"] | "";
+  if (pct[0]) {
+    d.changePct = atof(pct);
+    d.change = atof(doc["priceChange"] | "0");
+    d.hasChange = true;
+  } else {
+    d.hasChange = false;
+  }
+
+  if (!d.userNamed && !d.name[0]) strlcpy(d.name, d.symbol, MAX_NAME_LEN);   // Binance's ticker has no company name
+  if (!d.currency[0]) strlcpy(d.currency, "$", sizeof(d.currency));          // USDT-margined ~= USD for display
+
+  String rl2 = s.ticker.range;
+  rl2.toUpperCase();
+  strlcpy(d.rangeLabel, rl2.c_str(), sizeof(d.rangeLabel));
+
+  d.valid = true;
+  d.error = false;
+  d.lastOkMs = millis();
+  return true;
+}
+
 // ---- parse: cash.ch daily-close series --------------------------------------
 // {"data":{"integration":{"solid":{"chart":{"timeserie":{"prices":
 //  [{"close":998.45},...]}}}}}} — closes are real JSON numbers here (unlike
@@ -600,7 +704,7 @@ static bool parseCashChart(const Settings& s, StockData& d, Stream& stream) {
 }
 
 // ---- one HTTP(S) GET + parse ----------------------------------------------
-enum ParseKind : uint8_t { PARSE_WEBHOOK, PARSE_YAHOO, PARSE_CASH_QUOTE, PARSE_CASH_CHART, PARSE_GITHUB, PARSE_FINNHUB, PARSE_YAHOO_QUOTE };
+enum ParseKind : uint8_t { PARSE_WEBHOOK, PARSE_YAHOO, PARSE_CASH_QUOTE, PARSE_CASH_CHART, PARSE_GITHUB, PARSE_FINNHUB, PARSE_YAHOO_QUOTE, PARSE_BINANCE };
 
 // cash.ch is the only host we let negotiate ECDHE, and only the first handshake
 // pays for it: this session resumes the rest for ~23 h.
@@ -610,6 +714,7 @@ static bool fetchUrl(const Settings& s, const String& url, ParseKind kind, Stock
   bool https = url.startsWith("https://");
   bool cash = (kind == PARSE_CASH_QUOTE || kind == PARSE_CASH_CHART);
   bool finnhub = (kind == PARSE_FINNHUB);
+  bool binance = (kind == PARSE_BINANCE);
 
   std::unique_ptr<NetClient> client;
   if (https) {
@@ -618,24 +723,25 @@ static bool fetchUrl(const Settings& s, const String& url, ParseKind kind, Stock
     //    and session resumption, and require a large CONTIGUOUS free block up
     //    front so a fragmented heap skips the fetch instead of crashing inside
     //    the handshake. The full cipher list (default) is left on for it.
-    //  - finnhub.io: also needs the full (ECDHE-capable) cipher list — like
-    //    most current API hosts it doesn't offer the cheap static-RSA suites
-    //    the block below relies on. No MFLN assumption or session resumption
-    //    (unlike cash.ch) since we haven't confirmed it honors either; sized
-    //    generously instead.
+    //  - finnhub.io / fapi.binance.com: also need the full (ECDHE-capable)
+    //    cipher list — like most current API hosts they don't offer the cheap
+    //    static-RSA suites the block below relies on. No MFLN assumption or
+    //    session resumption (unlike cash.ch) since we haven't confirmed either
+    //    honors it; sized generously instead (see the weather feature's
+    //    Open-Meteo bug for what happens when this buffer is too small).
     //  - Yahoo / GitHub / webhook: forced to the cheap static-RSA suites, so
     //    those handshakes stay as light as the old BASIC build.
     if (cash) {
-      if (platformMaxFreeBlock() < 16000) return false;   // largest contiguous block, not total
+      if (platformMaxFreeBlock() < 16000) { d.dbgLastHttpCode = -1000; return false; }   // largest contiguous block, not total
       client.reset(platformMakeSecureClient(512, &g_cashSession, 512, /*cheapCiphers=*/false));
-    } else if (finnhub) {
-      if (platformMaxFreeBlock() < 16000) return false;
-      client.reset(platformMakeSecureClient(2048, nullptr, 512, /*cheapCiphers=*/false));
+    } else if (finnhub || binance) {
+      if (platformMaxFreeBlock() < 16000) { d.dbgLastHttpCode = -1000; return false; }
+      client.reset(platformMakeSecureClient(5120, nullptr, 512, /*cheapCiphers=*/false));
     } else {
       // raw.githubusercontent.com sends a ~4 KB cert record and won't negotiate
       // MFLN, so it needs a bigger receive buffer than Yahoo's small records.
       uint16_t rx = (kind == PARSE_GITHUB) ? GH_QUOTES_RXBUF : 2048;
-      if (ESP.getFreeHeap() < (uint32_t)rx + 12000) return false;
+      if (ESP.getFreeHeap() < (uint32_t)rx + 12000) { d.dbgLastHttpCode = -1000; return false; }
       client.reset(platformMakeSecureClient(rx, nullptr, 512, /*cheapCiphers=*/true));
     }
   } else {
@@ -649,7 +755,7 @@ static bool fetchUrl(const Settings& s, const String& url, ParseKind kind, Stock
   // the raw stream via getStream(), which neither core de-chunks. Yahoo chunks
   // its HTTP/1.1 responses, which broke Yahoo tickers on the ESP32 targets.
   http.useHTTP10(true);
-  if (!http.begin(*client, url)) return false;
+  if (!http.begin(*client, url)) { d.dbgLastHttpCode = -900; return false; }
   http.addHeader("Accept", "application/json");
   if (kind == PARSE_YAHOO) {
     http.setUserAgent(F(YAHOO_USER_AGENT));   // empty UA => HTTP 429 from Yahoo
@@ -658,11 +764,14 @@ static bool fetchUrl(const Settings& s, const String& url, ParseKind kind, Stock
     http.setUserAgent(F(FW_NAME));            // GitHub rejects an empty UA
   } else if (kind == PARSE_FINNHUB) {
     http.setUserAgent(F(FW_NAME));
+  } else if (kind == PARSE_BINANCE) {
+    http.setUserAgent(F(FW_NAME));
   } else if (kind != PARSE_WEBHOOK) {
     http.setUserAgent(F(CASH_USER_AGENT));    // cash.ch requires none; sent to be identifiable
   }
 
   int code = http.GET();
+  d.dbgLastHttpCode = (int16_t)code;   // diagnostic: surfaced via /api/status regardless of source
   if (code != HTTP_CODE_OK) {
     http.end();
     return false;
@@ -674,8 +783,10 @@ static bool fetchUrl(const Settings& s, const String& url, ParseKind kind, Stock
     case PARSE_CASH_QUOTE: ok = parseCashQuote(s, d, http.getStream()); break;
     case PARSE_CASH_CHART: ok = parseCashChart(s, d, http.getStream()); break;
     case PARSE_FINNHUB:    ok = parseFinnhubQuote(s, d, http.getStream()); break;
+    case PARSE_BINANCE:    ok = parseBinanceQuote(s, d, http.getStream()); break;
     default:               ok = parseWebhook(s, d, http.getStream());   break;  // webhook + github: same JSON
   }
+  if (!ok) d.dbgLastHttpCode = -800;   // 200 OK but the body didn't parse the way this source expects
   http.end();
   return ok;
 }
@@ -686,18 +797,19 @@ static bool fetchUrl(const Settings& s, const String& url, ParseKind kind, Stock
 // error worth setting d.error for — `d` already has a valid regular-session
 // price before this runs.
 static void fetchYahooQuoteExt(const Settings& s, StockData& d) {
-  if (platformMaxFreeBlock() < 16000) return;
+  if (platformMaxFreeBlock() < 16000) { d.dbgQuoteHttpCode = -1000; return; }
   std::unique_ptr<NetClient> client(platformMakeSecureClient(2048));
 
   HTTPClient http;
   http.setTimeout(s.httpTimeout);
   http.setReuse(false);
   http.useHTTP10(true);
-  if (!http.begin(*client, buildYahooQuoteUrl(YAHOO_QUOTE_HOST1, d.symbol))) return;
+  if (!http.begin(*client, buildYahooQuoteUrl(YAHOO_QUOTE_HOST1, d.symbol))) { d.dbgQuoteHttpCode = -900; return; }
   http.addHeader("Accept", "application/json");
   http.setUserAgent(F(YAHOO_USER_AGENT));
 
   int code = http.GET();
+  d.dbgQuoteHttpCode = (int16_t)code;   // diagnostic: surfaced via /api/status regardless of outcome
   if (code != HTTP_CODE_OK) { http.end(); return; }   // 401/403/999 etc: Yahoo blocked it — silently skip
   applyYahooQuoteExt(d, http.getStream());
   http.end();
@@ -714,15 +826,43 @@ static uint8_t g_fetchPhase = 0;
 // Returns true when this symbol is finished (caller advances to the next).
 static bool stepSymbol(const Settings& s, StockData& d) {
   if (d.source == SRC_YAHOO) {
-    if (g_fetchPhase == 0) {
-      if (fetchUrl(s, buildYahooUrl(s, YAHOO_CHART_HOST1, d.symbol), PARSE_YAHOO, d)) { g_fetchPhase = 2; return false; }
-      g_fetchPhase = 1;                 // transient drop: retry the mirror next tick
-      return false;
+    // Off-hours hand-off to Binance (SymbolCfg.altSymbol) — see the US-hours
+    // helper above and config.h's BINANCE_HOST comment. Single-phase, like
+    // SRC_BINANCE below: skips the whole Yahoo chart/quote dance entirely
+    // while the US market's closed, and resumes it automatically (fresh
+    // sparkline included) the moment usMarketRegularHoursNow() flips back.
+    if (d.altSymbol[0] && !usMarketRegularHoursNow()) {
+      bool ok = fetchUrl(s, buildBinanceUrl(d.altSymbol), PARSE_BINANCE, d);
+      if (ok) { d.extHours = true; strlcpy(d.extLabel, "24/7", sizeof(d.extLabel)); }
+      else    d.error = true;
+      return true;
     }
-    if (g_fetchPhase == 1) {
-      if (!fetchUrl(s, buildYahooUrl(s, YAHOO_CHART_HOST2, d.symbol), PARSE_YAHOO, d)) { d.error = true; return true; }
+    if (g_fetchPhase == 0 || g_fetchPhase == 1) {
+      const char* host = (g_fetchPhase == 0) ? YAHOO_CHART_HOST1 : YAHOO_CHART_HOST2;
+      if (!fetchUrl(s, buildYahooUrl(s, host, d.symbol), PARSE_YAHOO, d)) {
+        if (g_fetchPhase == 0) { g_fetchPhase = 1; return false; }   // transient drop: retry the mirror next tick
+        d.error = true;
+        return true;
+      }
+      // Holiday check, without hardcoding a calendar: our hours math above
+      // said "should be open", but if regularMarketTime — just refreshed by
+      // the fetch above — is still >18h old, today's session demonstrably
+      // hasn't produced a fresh trade. Rechecked on every cycle (not just
+      // once), so the moment a real session actually opens this notices
+      // within one poll interval, rather than getting stuck showing Binance
+      // for the rest of the day once a holiday is (correctly) detected.
+      bool stale = d.regularMarketTime &&
+                   ((uint32_t)time(nullptr) - d.regularMarketTime) > 18UL * 3600UL;
+      if (d.altSymbol[0] && stale) { g_fetchPhase = 3; return false; }
       g_fetchPhase = 2;
       return false;
+    }
+    if (g_fetchPhase == 3) {   // holiday hand-off — see the staleness check above
+      bool ok = fetchUrl(s, buildBinanceUrl(d.altSymbol), PARSE_BINANCE, d);
+      if (ok) { d.extHours = true; strlcpy(d.extLabel, "24/7", sizeof(d.extLabel)); }
+      // else: leave Yahoo's (stale but valid) price in place rather than erroring —
+      // still better than nothing, and next cycle tries fresh Yahoo data again anyway.
+      return true;
     }
     // phase 2: best-effort extended-hours overlay (see config.h's
     // YAHOO_QUOTE_HOST comment) — a separate tick, same one-handshake-per-call
@@ -761,6 +901,11 @@ static bool stepSymbol(const Settings& s, StockData& d) {
   if (d.source == SRC_FINNHUB) {
     if (s.ticker.finnhubKey.length() < 4) { d.error = true; return true; }   // no key set yet
     if (!fetchUrl(s, buildFinnhubUrl(s, d.symbol), PARSE_FINNHUB, d)) d.error = true;
+    return true;
+  }
+
+  if (d.source == SRC_BINANCE) {
+    if (!fetchUrl(s, buildBinanceUrl(d.symbol), PARSE_BINANCE, d)) d.error = true;
     return true;
   }
 

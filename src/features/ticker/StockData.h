@@ -8,6 +8,8 @@ struct StockData {
   char    name[MAX_NAME_LEN];
   char    currency[6];
   char    rangeLabel[8];
+  char    altSymbol[MAX_SYMBOL_LEN];  // Binance symbol for off-hours (copied from SymbolCfg; "" = disabled)
+  uint32_t regularMarketTime;  // Yahoo's meta.regularMarketTime (Unix seconds) — used for the holiday check in stepSymbol
   uint8_t source;     // SRC_* this ticker fetches from (copied from settings)
   float   qty;        // position size (copied from settings; 0 = no position)
   float   cost;       // cost basis per unit
@@ -18,10 +20,12 @@ struct StockData {
   bool  hasChange;    // a change value was provided/derived
 
   bool  extHours;     // true if `price` is a pre/post-market quote, not the regular session's
-  char  extLabel[4];  // "PRE" or "AH" when extHours is set; "" otherwise
+  char  extLabel[6];  // "PRE", "AH", or "24/7" when extHours is set; "" otherwise
   char  dbgMarketState[10];  // diagnostic: raw meta.marketState from Yahoo, whatever it sent
   bool  dbgHasPostPrice;      // diagnostic: did meta include a postMarketPrice key at all
   bool  dbgHasPrePrice;       // diagnostic: did meta include a preMarketPrice key at all
+  int16_t dbgQuoteHttpCode;   // diagnostic: v7/finance/quote's HTTP status (0 = never attempted), or a negative HTTPClient error code
+  int16_t dbgLastHttpCode;    // diagnostic: this symbol's own last fetch — HTTP status, or a negative HTTPClient error code (any source)
 
   float   spark[MAX_SPARK_POINTS];
   uint8_t sparkCount;
@@ -40,7 +44,8 @@ struct StockData {
   uint8_t  fails;     // consecutive failed attempts (drives the backoff)
 
   void clear() {
-    symbol[0] = name[0] = currency[0] = rangeLabel[0] = 0;
+    symbol[0] = name[0] = currency[0] = rangeLabel[0] = altSymbol[0] = 0;
+    regularMarketTime = 0;
     source = DEFAULT_SOURCE;
     qty = cost = 0;
     price = change = changePct = 0;
@@ -50,6 +55,8 @@ struct StockData {
     dbgMarketState[0] = 0;
     dbgHasPostPrice = false;
     dbgHasPrePrice = false;
+    dbgQuoteHttpCode = 0;
+    dbgLastHttpCode = 0;
     sparkCount = 0;
     valid = false;
     error = false;

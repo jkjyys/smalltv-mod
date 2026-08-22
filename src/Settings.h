@@ -17,6 +17,9 @@ struct SymbolCfg {
   uint8_t source;     // SRC_* per ticker (see config.h)
   float   qty;        // position size; 0 = not a position
   float   cost;       // cost basis per unit, in the instrument's currency
+  char    altSymbol[MAX_SYMBOL_LEN];  // Binance symbol (e.g. "INTCUSDT") to switch to
+                                      // outside US regular trading hours; "" disables this.
+                                      // Only meaningful when source == SRC_YAHOO.
 };
 
 // A home-area airport marker (radar feature), configured in the web UI.

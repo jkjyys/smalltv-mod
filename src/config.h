@@ -139,6 +139,7 @@
 #define SRC_CASH     2
 #define SRC_GHUB     3   // static JSON read from a repo's data branch (see below)
 #define SRC_FINNHUB  4   // finnhub.io quote endpoint — needs a free API key, reflects pre/post-market
+#define SRC_BINANCE  5   // Binance USDⓈ-M perpetual futures — no key needed, trades continuously (see below)
 #define DEFAULT_SOURCE  SRC_YAHOO            // works out of the box, no server
 
 // Yahoo Finance public chart endpoint. A browser-like User-Agent is required —
@@ -172,6 +173,18 @@
 // paid-only, so a Finnhub symbol shows price + change only, no chart.
 #define FINNHUB_HOST       "finnhub.io"
 #define FINNHUB_QUOTE_PATH "/api/v1/quote"
+
+// Binance USDⓈ-M perpetual futures (SRC_BINANCE). Free, no key or account —
+// symbols like BTCUSDT trade the way crypto always has (continuously), but
+// Binance has also started listing perpetuals on a handful of US stocks
+// (e.g. INTCUSDT) that track the underlying share price around the clock,
+// including outside NYSE/Nasdaq hours — sidestepping the pre/post-market
+// problem entirely instead of chasing it the way the Yahoo/Finnhub paths
+// above do. Symbol is Binance's own ticker (e.g. "BTCUSDT", "INTCUSDT"),
+// typed exactly as shown on binance.com/en/futures/<SYMBOL>. No sparkline —
+// kept single-request like Finnhub above; klines is a second call.
+#define BINANCE_HOST         "fapi.binance.com"
+#define BINANCE_TICKER_PATH  "/fapi/v1/ticker/24hr"
 
 // cash.ch public GraphQL endpoint. The device sends two small hand-written
 // GraphQL queries per symbol as plain GETs (?query=...): a ~200 B quote and a
