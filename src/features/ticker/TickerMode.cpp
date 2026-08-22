@@ -243,10 +243,10 @@ static void drawStock(const StockData& d, uint8_t pageIndex, uint8_t pageCount,
                      : (d.source == SRC_GHUB)    ? "GITHUB"
                      : (d.source == SRC_FINNHUB) ? "FINNHUB"
                      : (d.source == SRC_BINANCE) ? "BINANCE" : "WEBHOOK";
-    int sz = 1;
+    int sz = 2;   // was 1 + C_DGRAY — technically drawn, but too small/dim to notice against the corner
     int tw = gfxTextW(src, sz);
     gfx->setTextSize(sz);
-    gfx->setTextColor(C_DGRAY);
+    gfx->setTextColor(C_GRAY);
     gfx->setCursor(TFT_WIDTH - tw - 4, 224);   // same row as updated-ago (bottom-left) — the row below is overscanned on this panel
     gfx->print(src);
   }
