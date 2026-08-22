@@ -16,13 +16,16 @@
 // symptom (a frozen-looking price) is the same one this feature exists to
 // reduce, not a new failure mode.
 static int8_t nthSundayOfMonth(int year, int month /*1-12*/, int n) {
-  struct tm t = {};
-  t.tm_year = year - 1900;
-  t.tm_mon = month - 1;
-  t.tm_mday = 1;
-  time_t tt = mktime(&t);       // normalizes tm_wday for the 1st of the month
-  gmtime_r(&tt, &t);
-  int firstSunday = 1 + ((7 - t.tm_wday) % 7);
+  // Sakamoto's day-of-week algorithm — plain integer math, no struct tm and
+  // no mktime(). mktime() normalizes a full tm struct and is surprisingly
+  // stack-heavy on this platform's libc; calling it every stepSymbol tick ate
+  // into the ESP8266's already-thin continuation stack enough to crash-loop
+  // the device. This does the same job (day-of-week of the 1st of the month)
+  // with a handful of local ints.
+  static const int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+  int y = (month < 3) ? year - 1 : year;
+  int dow1 = (y + y / 4 - y / 100 + y / 400 + t[month - 1] + 1) % 7;   // 0 = Sunday, day = 1
+  int firstSunday = 1 + ((7 - dow1) % 7);
   return firstSunday + 7 * (n - 1);
 }
 
