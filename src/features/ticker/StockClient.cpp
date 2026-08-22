@@ -270,7 +270,7 @@ static String buildBinanceKlinesUrl(const Settings& s, const char* symbol) {
   url += urlEncode(symbol);
   url += F("&interval=");
   url += binanceInterval(range);
-  url += F("&limit=48");   // matches MAX_SPARK_POINTS' rough magnitude elsewhere
+  url += F("&limit=20");   // kept modest: unfiltered parsing below keeps the whole 12-field row per candle
   return url;
 }
 
@@ -679,23 +679,16 @@ static bool parseBinanceQuote(const Settings& s, StockData& d, Stream& stream) {
   return true;
 }
 
-// Binance /fapi/v1/klines — each candle is a 12-element array; we only want
-// index 4 (close price, as a string, same as the quote endpoint). Filtering
-// an array-of-arrays down to one column per row this way keeps the parsed
-// size to roughly one float per candle instead of the whole OHLCV row.
-// (Whether the filtered result keeps that field at its original index 4 or
-// compacts to index 0 isn't documented either way, so the loop below just
-// takes whichever single string value survived the filter.)
+// Binance /fapi/v1/klines — each candle is a 12-element array; index 4 is the
+// close price (as a string, same convention as the quote endpoint). No
+// filter here — ArduinoJson's array filters are documented for object keys
+// far more clearly than for picking one column out of an array-of-arrays,
+// and an untested filter shape failing silently (candles kept but empty) is
+// a worse failure mode than just parsing the whole row and indexing into it.
+// The request itself stays small (limit=20 above) to keep this cheap anyway.
 static bool parseBinanceKlines(StockData& d, Stream& stream) {
-  JsonDocument filter;
-  JsonArray outer = filter.to<JsonArray>();
-  JsonArray tmpl = outer.add<JsonArray>();
-  for (int i = 0; i < 4; i++) tmpl.add(false);
-  tmpl.add(true);   // index 4 = close
-
   JsonDocument doc;
-  DeserializationError err = deserializeJson(
-      doc, stream, DeserializationOption::Filter(filter));
+  DeserializationError err = deserializeJson(doc, stream);
   if (err) return false;
 
   JsonArrayConst arr = doc.as<JsonArrayConst>();
@@ -704,11 +697,8 @@ static bool parseBinanceKlines(StockData& d, Stream& stream) {
   d.sparkCount = 0;
   for (JsonArrayConst k : arr) {
     if (d.sparkCount >= MAX_SPARK_POINTS) break;
-    const char* close = nullptr;
-    for (JsonVariantConst v : k) {
-      if (v.is<const char*>()) { close = v.as<const char*>(); break; }
-    }
-    if (!close || !close[0]) continue;
+    const char* close = k[4] | "";
+    if (!close[0]) continue;
     d.spark[d.sparkCount++] = atof(close);
   }
   return d.sparkCount > 0;
