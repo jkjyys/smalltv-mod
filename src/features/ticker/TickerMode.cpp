@@ -122,7 +122,12 @@ static void drawStock(const StockData& d, uint8_t pageIndex, uint8_t pageCount,
     fmtPrice(d.price, num, sizeof(num));
     char line[28];
     snprintf(line, sizeof(line), "%s%s", d.currency, num);
-    uint8_t sz = gfxFitSize(line, 236, 6);
+    // Capped at 4 (not gfxFitSize's usual max of 6): a short price like a
+    // 2-digit stock otherwise renders noticeably larger than a longer one
+    // like a BTC price or an FX rate, purely because it has more room to
+    // grow into — capping keeps the price line a consistent size regardless
+    // of how many digits happen to be in it.
+    uint8_t sz = gfxFitSize(line, 236, 4);
     int ph = 8 * sz;
     int py = s.ticker.showName ? 74 : 64;
     gfxDrawCentered(line, py, sz, C_WHITE);   // price stays neutral (not trend-colored)
@@ -242,7 +247,7 @@ static void drawStock(const StockData& d, uint8_t pageIndex, uint8_t pageCount,
     int tw = gfxTextW(src, sz);
     gfx->setTextSize(sz);
     gfx->setTextColor(C_DGRAY);
-    gfx->setCursor(TFT_WIDTH - tw - 4, 232);
+    gfx->setCursor(TFT_WIDTH - tw - 4, 224);   // same row as updated-ago (bottom-left) — the row below is overscanned on this panel
     gfx->print(src);
   }
 
