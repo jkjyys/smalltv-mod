@@ -193,7 +193,7 @@ static void drawStock(const StockData& d, uint8_t pageIndex, uint8_t pageCount,
   // is actually on the range basis, so the drawn end matches the number)
   if (s.ticker.showChart && d.sparkCount >= 2) {
     int top = y < 150 ? 156 : y + 4;
-    int bottom = 228;
+    int bottom = 216;   // was 228 — see the bottom-left badge's comment below: that row needs real clearance above it, not just enough to not literally overlap
     float livePt = onRange ? d.price : NAN;
     if (top < bottom - 10) drawSparkline(gfx, d, top, bottom, trendC, livePt);
   }
@@ -219,36 +219,32 @@ static void drawStock(const StockData& d, uint8_t pageIndex, uint8_t pageCount,
     gfx->print(d.rangeLabel);
   }
 
-  // Updated-ago (bottom-left)
-  if (s.ticker.showUpdatedAgo && d.lastOkMs) {
-    uint32_t ago = (millis() - d.lastOkMs) / 1000;
-    char buf[12];
-    if (ago < 100) snprintf(buf, sizeof(buf), "%lus", (unsigned long)ago);
-    else           snprintf(buf, sizeof(buf), "%lum", (unsigned long)(ago / 60));
-    gfx->setTextSize(2);
-    gfx->setTextColor(d.error ? C_RED : C_DGRAY);
-    gfx->setCursor(4, 224);
+  // Updated-ago + data source, bottom-left, one line together. Previously sat
+  // at y=224 size 2 (16 px tall) — on a 240 px panel that's rows 224-240,
+  // i.e. flush against the physical bottom edge with zero margin, and this
+  // panel crops that edge (see the chart's `bottom` above, pulled up to make
+  // room). Smaller text and higher up so there's real clearance this time,
+  // not just "doesn't overlap the chart on paper".
+  if ((s.ticker.showUpdatedAgo && d.lastOkMs) || s.ticker.showSource) {
+    char buf[24] = "";
+    if (s.ticker.showUpdatedAgo && d.lastOkMs) {
+      uint32_t ago = (millis() - d.lastOkMs) / 1000;
+      if (ago < 100) snprintf(buf, sizeof(buf), "%lus", (unsigned long)ago);
+      else           snprintf(buf, sizeof(buf), "%lum", (unsigned long)(ago / 60));
+    }
+    if (s.ticker.showSource) {
+      const char* src = (d.source == SRC_YAHOO)   ? "YAHOO"
+                       : (d.source == SRC_CASH)    ? "CASH.CH"
+                       : (d.source == SRC_GHUB)    ? "GITHUB"
+                       : (d.source == SRC_FINNHUB) ? "FINNHUB"
+                       : (d.source == SRC_BINANCE) ? "BINANCE" : "WEBHOOK";
+      if (buf[0]) strlcat(buf, " ", sizeof(buf));
+      strlcat(buf, src, sizeof(buf));
+    }
+    gfx->setTextSize(1);
+    gfx->setTextColor(d.error ? C_RED : C_GRAY);   // C_GRAY, not C_DGRAY — smaller text needs the contrast
+    gfx->setCursor(4, 220);
     gfx->print(buf);
-  }
-
-  // Data source label (bottom-right) — which provider this symbol's numbers
-  // came from just now. Mainly useful for a symbol whose source can change
-  // mid-session (a Yahoo ticker with an altSymbol handing off to Binance);
-  // for a fixed single-source ticker it's the same word every time, which is
-  // still handy for a settings-page memory jog, so it's shown for any source
-  // when the toggle is on, not just the ones that switch.
-  if (s.ticker.showSource) {
-    const char* src = (d.source == SRC_YAHOO)   ? "YAHOO"
-                     : (d.source == SRC_CASH)    ? "CASH.CH"
-                     : (d.source == SRC_GHUB)    ? "GITHUB"
-                     : (d.source == SRC_FINNHUB) ? "FINNHUB"
-                     : (d.source == SRC_BINANCE) ? "BINANCE" : "WEBHOOK";
-    int sz = 2;   // was 1 + C_DGRAY — technically drawn, but too small/dim to notice against the corner
-    int tw = gfxTextW(src, sz);
-    gfx->setTextSize(sz);
-    gfx->setTextColor(C_GRAY);
-    gfx->setCursor(TFT_WIDTH - tw - 4, 224);   // same row as updated-ago (bottom-left) — the row below is overscanned on this panel
-    gfx->print(src);
   }
 
   // Stale/error dot (top-left) when last refresh failed but we have old data.
