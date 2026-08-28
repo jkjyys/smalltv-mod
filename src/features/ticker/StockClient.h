@@ -18,6 +18,14 @@ bool             stocksAnyValid();
 // on the poll interval; the web UI shows this next to a failing ticker.
 uint32_t stockRetryInSec(uint8_t i);
 
+// True if any configured symbol needs a trusted clock — an off-hours Binance
+// hand-off (SymbolCfg.altSymbol) can't tell US market hours apart from
+// "clock not synced yet" without one. Lets Clock.cpp start NTP for this
+// reason too, the same way night mode and WireGuard already do (see
+// Clock.cpp's clockReapply — NTP is normally left off by default on the
+// ESP8266 to save the always-on heap it costs).
+bool tickerNeedsClock(const Settings& s);
+
 // Shared USD/KRW rate for the optional "≈ ₩..." line under a USD price
 // (Settings.ticker.showKrw). One quiet background fetch (Yahoo's KRW=X pair),
 // independent of the configured symbol list — not shown as a ticker itself.

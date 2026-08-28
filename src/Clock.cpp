@@ -2,6 +2,9 @@
 #include "Platform.h"
 #include "config.h"
 #include "WgClient.h"
+#if WITH_TICKER
+#include "StockClient.h"
+#endif
 
 static String            s_armedTz;          // last tzPosix armed (clockReapply re-arms only on change)
 static bool              s_ntpStarted = false; // SNTP has been started (only when night mode needs it)
@@ -45,9 +48,16 @@ void clockReapply(const Settings& s) {
   // fragment the largest contiguous block below what the cash.ch TLS handshake
   // needs (blanking those tickers). So arm on the first enable, re-arm on a
   // timezone change, and otherwise leave it alone. Night mode is one caller; a
-  // WireGuard tunnel is the other, because the peer rejects a handshake stamped
-  // with a wrong clock (and that build is an ESP32, where the heap cost is moot).
-  if (!s.clock.nightEnabled && !wgNeedsClock(s)) return;
+  // WireGuard tunnel is another (the peer rejects a handshake stamped with a
+  // wrong clock, and that build is an ESP32, where the heap cost is moot); a
+  // ticker's off-hours Binance hand-off (SymbolCfg.altSymbol) is a third —
+  // without a synced clock it can't tell "market's closed" from "don't know
+  // yet", and silently defaults to always showing the regular-session source.
+  bool needClock = s.clock.nightEnabled || wgNeedsClock(s);
+#if WITH_TICKER
+  needClock = needClock || tickerNeedsClock(s);
+#endif
+  if (!needClock) return;
   if (!s_ntpStarted || s.clock.tzPosix != s_armedTz) clockBegin(s);
 }
 

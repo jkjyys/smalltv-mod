@@ -1057,3 +1057,9 @@ void stocksService(const Settings& s) {
 
   g_refreshing = false;
 }
+
+bool tickerNeedsClock(const Settings& s) {
+  for (uint8_t i = 0; i < s.ticker.symbolCount; i++)
+    if (s.ticker.symbols[i].source == SRC_YAHOO && s.ticker.symbols[i].altSymbol[0]) return true;
+  return false;
+}
