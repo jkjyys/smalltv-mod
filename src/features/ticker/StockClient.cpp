@@ -172,19 +172,6 @@ static String buildYahooUrl(const Settings& s, const char* host, const char* sym
   url += range;
   url += F("&interval=");
   url += yahooInterval(range);
-  url += F("&includePrePost=true");   // ask for extended-hours fields too — see StockClient.cpp's parseYahoo
-  return url;
-}
-
-// v7/finance/quote — see config.h's YAHOO_QUOTE_HOST comment. One extra
-// best-effort fetch, only for the marketState/post/pre fields the v8 chart
-// endpoint above doesn't carry.
-static String buildYahooQuoteUrl(const char* host, const char* symbol) {
-  String url = F("https://");
-  url += host;
-  url += F(YAHOO_QUOTE_PATH);
-  url += F("?symbols=");
-  url += urlEncode(symbol);
   return url;
 }
 
@@ -357,13 +344,6 @@ static bool parseYahoo(const Settings& s, StockData& d, Stream& stream) {
   fmeta["currency"]           = true;
   fmeta["shortName"]          = true;
   fmeta["longName"]           = true;
-  fmeta["marketState"]           = true;   // "PRE" | "REGULAR" | "POST" | "POSTPOST" | "CLOSED" | ...
-  fmeta["postMarketPrice"]       = true;
-  fmeta["postMarketChange"]      = true;
-  fmeta["postMarketChangePercent"] = true;
-  fmeta["preMarketPrice"]        = true;
-  fmeta["preMarketChange"]       = true;
-  fmeta["preMarketChangePercent"] = true;
   fmeta["regularMarketTime"]     = true;   // Unix seconds of the last regular-session price — used for the holiday check below
   filter["chart"]["result"][0]["indicators"]["quote"][0]["close"] = true;
 
@@ -405,37 +385,14 @@ static bool parseYahoo(const Settings& s, StockData& d, Stream& stream) {
     d.hasChange = false;
   }
 
-  // Extended-hours overlay: Yahoo keeps regularMarketPrice pinned to the last
-  // regular-session trade even while pre/post-market trading is live, so a US
-  // stock checked from Korea during the day (US pre/post hours) looked frozen
-  // without this — apps like Toss show the moving extended-hours price instead.
-  d.extHours = false;
-  d.extLabel[0] = 0;
-  const char* mkt = meta["marketState"] | "";
-  strlcpy(d.dbgMarketState, mkt, sizeof(d.dbgMarketState));
-  d.dbgHasPostPrice = !meta["postMarketPrice"].isNull();
-  d.dbgHasPrePrice  = !meta["preMarketPrice"].isNull();
-  bool isPost = !strcmp(mkt, "POST") || !strcmp(mkt, "POSTPOST");
-  bool isPre  = !strcmp(mkt, "PRE") || !strcmp(mkt, "PREPRE");
-  if (isPost && (meta["postMarketPrice"].is<float>() || meta["postMarketPrice"].is<int>())) {
-    d.price = meta["postMarketPrice"].as<float>();
-    if (meta["postMarketChangePercent"].is<float>() || meta["postMarketChangePercent"].is<int>()) {
-      d.changePct = meta["postMarketChangePercent"].as<float>();
-      d.change = meta["postMarketChange"] | (d.price - price);
-      d.hasChange = true;
-    }
-    d.extHours = true;
-    strlcpy(d.extLabel, "AH", sizeof(d.extLabel));
-  } else if (isPre && (meta["preMarketPrice"].is<float>() || meta["preMarketPrice"].is<int>())) {
-    d.price = meta["preMarketPrice"].as<float>();
-    if (meta["preMarketChangePercent"].is<float>() || meta["preMarketChangePercent"].is<int>()) {
-      d.changePct = meta["preMarketChangePercent"].as<float>();
-      d.change = meta["preMarketChange"] | (d.price - price);
-      d.hasChange = true;
-    }
-    d.extHours = true;
-    strlcpy(d.extLabel, "PRE", sizeof(d.extLabel));
-  }
+  // Extended-hours: NOT sourced here. Confirmed by testing (see /api/status's
+  // earlier diagnostic logs) that Yahoo's v8/chart meta never carries
+  // marketState/postMarketPrice/preMarketPrice regardless of includePrePost,
+  // and the dedicated v7/finance/quote endpoint that does is blocked (401) for
+  // this device. extHours/extLabel are left at their cleared defaults here —
+  // a Yahoo symbol with SymbolCfg.altSymbol set gets its off-hours price from
+  // Binance instead (see stepSymbol's SRC_YAHOO branch), which is the only
+  // extended-hours path that's actually reachable.
 
   String rl = s.ticker.range;
   rl.toUpperCase();
@@ -478,64 +435,6 @@ static bool parseYahoo(const Settings& s, StockData& d, Stream& stream) {
   d.error = false;
   d.lastOkMs = millis();
   return true;
-}
-
-// v7/finance/quote overlay — see config.h's YAHOO_QUOTE_HOST comment. Runs
-// AFTER a successful parseYahoo() above, so `d` already has its regular-session
-// price/change/name/spark/currency; this only overwrites the extHours fields
-// if the market is genuinely in a pre/post session right now. Returns false
-// (and leaves `d` untouched) on any failure or if the session is REGULAR/
-// CLOSED — that's not an error, just nothing to overlay.
-static bool applyYahooQuoteExt(StockData& d, Stream& stream) {
-  JsonDocument filter;
-  filter["quoteResponse"]["result"][0]["marketState"] = true;
-  filter["quoteResponse"]["result"][0]["postMarketPrice"] = true;
-  filter["quoteResponse"]["result"][0]["postMarketChange"] = true;
-  filter["quoteResponse"]["result"][0]["postMarketChangePercent"] = true;
-  filter["quoteResponse"]["result"][0]["preMarketPrice"] = true;
-  filter["quoteResponse"]["result"][0]["preMarketChange"] = true;
-  filter["quoteResponse"]["result"][0]["preMarketChangePercent"] = true;
-
-  JsonDocument doc;
-  DeserializationError err = deserializeJson(
-      doc, stream, DeserializationOption::Filter(filter));
-  if (err) return false;
-
-  JsonObjectConst res = doc["quoteResponse"]["result"][0];
-  if (res.isNull()) return false;
-
-  const char* mkt = res["marketState"] | "";
-  strlcpy(d.dbgMarketState, mkt, sizeof(d.dbgMarketState));
-  d.dbgHasPostPrice = !res["postMarketPrice"].isNull();
-  d.dbgHasPrePrice  = !res["preMarketPrice"].isNull();
-
-  bool isPost = !strcmp(mkt, "POST") || !strcmp(mkt, "POSTPOST");
-  bool isPre  = !strcmp(mkt, "PRE") || !strcmp(mkt, "PREPRE");
-  float regularPrice = d.price;   // parseYahoo()'s regular-session price, for a change fallback below
-
-  if (isPost && (res["postMarketPrice"].is<float>() || res["postMarketPrice"].is<int>())) {
-    d.price = res["postMarketPrice"].as<float>();
-    if (res["postMarketChangePercent"].is<float>() || res["postMarketChangePercent"].is<int>()) {
-      d.changePct = res["postMarketChangePercent"].as<float>();
-      d.change = res["postMarketChange"] | (d.price - regularPrice);
-      d.hasChange = true;
-    }
-    d.extHours = true;
-    strlcpy(d.extLabel, "AH", sizeof(d.extLabel));
-    return true;
-  }
-  if (isPre && (res["preMarketPrice"].is<float>() || res["preMarketPrice"].is<int>())) {
-    d.price = res["preMarketPrice"].as<float>();
-    if (res["preMarketChangePercent"].is<float>() || res["preMarketChangePercent"].is<int>()) {
-      d.changePct = res["preMarketChangePercent"].as<float>();
-      d.change = res["preMarketChange"] | (d.price - regularPrice);
-      d.hasChange = true;
-    }
-    d.extHours = true;
-    strlcpy(d.extLabel, "PRE", sizeof(d.extLabel));
-    return true;
-  }
-  return false;   // parsed fine, just not in an extended session right now
 }
 
 // ---- parse: cash.ch quote ---------------------------------------------------
@@ -755,7 +654,7 @@ static bool parseCashChart(const Settings& s, StockData& d, Stream& stream) {
 }
 
 // ---- one HTTP(S) GET + parse ----------------------------------------------
-enum ParseKind : uint8_t { PARSE_WEBHOOK, PARSE_YAHOO, PARSE_CASH_QUOTE, PARSE_CASH_CHART, PARSE_GITHUB, PARSE_FINNHUB, PARSE_YAHOO_QUOTE, PARSE_BINANCE, PARSE_BINANCE_KLINES };
+enum ParseKind : uint8_t { PARSE_WEBHOOK, PARSE_YAHOO, PARSE_CASH_QUOTE, PARSE_CASH_CHART, PARSE_GITHUB, PARSE_FINNHUB, PARSE_BINANCE, PARSE_BINANCE_KLINES };
 
 // cash.ch is the only host we let negotiate ECDHE, and only the first handshake
 // pays for it: this session resumes the rest for ~23 h.
@@ -845,30 +744,6 @@ static bool fetchUrl(const Settings& s, const String& url, ParseKind kind, Stock
   return ok;
 }
 
-// v7/finance/quote overlay fetch — see config.h's YAHOO_QUOTE_HOST comment
-// and applyYahooQuoteExt() above. Kept as its own small function (rather than
-// routed through fetchUrl()'s generic dispatch) since a miss here is never an
-// error worth setting d.error for — `d` already has a valid regular-session
-// price before this runs.
-static void fetchYahooQuoteExt(const Settings& s, StockData& d) {
-  if (platformMaxFreeBlock() < 16000) { d.dbgQuoteHttpCode = -1000; return; }
-  std::unique_ptr<NetClient> client(platformMakeSecureClient(2048));
-
-  HTTPClient http;
-  http.setTimeout(s.httpTimeout);
-  http.setReuse(false);
-  http.useHTTP10(true);
-  if (!http.begin(*client, buildYahooQuoteUrl(YAHOO_QUOTE_HOST1, d.symbol))) { d.dbgQuoteHttpCode = -900; return; }
-  http.addHeader("Accept", "application/json");
-  http.setUserAgent(F(YAHOO_USER_AGENT));
-
-  int code = http.GET();
-  d.dbgQuoteHttpCode = (int16_t)code;   // diagnostic: surfaced via /api/status regardless of outcome
-  if (code != HTTP_CODE_OK) { http.end(); return; }   // 401/403/999 etc: Yahoo blocked it — silently skip
-  applyYahooQuoteExt(d, http.getStream());
-  http.end();
-}
-
 // ---- fetch one symbol, one network request per call -----------------------
 // A symbol may need several requests (Yahoo mirror retry; cash.ch quote, its
 // retry, then the chart). Each is a separate step so only ONE TLS handshake
@@ -908,21 +783,13 @@ static bool stepSymbol(const Settings& s, StockData& d) {
       bool stale = d.regularMarketTime &&
                    ((uint32_t)time(nullptr) - d.regularMarketTime) > 18UL * 3600UL;
       if (d.altSymbol[0] && stale) { g_fetchPhase = 3; return false; }
-      g_fetchPhase = 2;
-      return false;
+      return true;   // regular Yahoo price is good as-is — no more phases needed
     }
-    if (g_fetchPhase == 3) {   // holiday hand-off — see the staleness check above
-      bool ok = fetchUrl(s, buildBinanceUrl(d.altSymbol), PARSE_BINANCE, d);
-      if (ok) { d.extHours = true; strlcpy(d.extLabel, "24/7", sizeof(d.extLabel)); }
-      // else: leave Yahoo's (stale but valid) price in place rather than erroring —
-      // still better than nothing, and next cycle tries fresh Yahoo data again anyway.
-      return true;
-    }
-    // phase 2: best-effort extended-hours overlay (see config.h's
-    // YAHOO_QUOTE_HOST comment) — a separate tick, same one-handshake-per-call
-    // rule as cash.ch's phases above. Failure here is silent and non-fatal:
-    // `d` already has a valid regular-session price from phase 0/1.
-    fetchYahooQuoteExt(s, d);
+    // phase 3: holiday hand-off — see the staleness check above
+    bool ok = fetchUrl(s, buildBinanceUrl(d.altSymbol), PARSE_BINANCE, d);
+    if (ok) { d.extHours = true; strlcpy(d.extLabel, "24/7", sizeof(d.extLabel)); }
+    // else: leave Yahoo's (stale but valid) price in place rather than erroring —
+    // still better than nothing, and next cycle tries fresh Yahoo data again anyway.
     return true;
   }
 

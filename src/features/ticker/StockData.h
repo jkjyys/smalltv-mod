@@ -21,10 +21,6 @@ struct StockData {
 
   bool  extHours;     // true if `price` is a pre/post-market quote, not the regular session's
   char  extLabel[6];  // "PRE", "AH", or "24/7" when extHours is set; "" otherwise
-  char  dbgMarketState[10];  // diagnostic: raw meta.marketState from Yahoo, whatever it sent
-  bool  dbgHasPostPrice;      // diagnostic: did meta include a postMarketPrice key at all
-  bool  dbgHasPrePrice;       // diagnostic: did meta include a preMarketPrice key at all
-  int16_t dbgQuoteHttpCode;   // diagnostic: v7/finance/quote's HTTP status (0 = never attempted), or a negative HTTPClient error code
   int16_t dbgLastHttpCode;    // diagnostic: this symbol's own last fetch — HTTP status, or a negative HTTPClient error code (any source)
 
   float   spark[MAX_SPARK_POINTS];
@@ -52,10 +48,6 @@ struct StockData {
     hasChange = false;
     extHours = false;
     extLabel[0] = 0;
-    dbgMarketState[0] = 0;
-    dbgHasPostPrice = false;
-    dbgHasPrePrice = false;
-    dbgQuoteHttpCode = 0;
     dbgLastHttpCode = 0;
     sparkCount = 0;
     valid = false;

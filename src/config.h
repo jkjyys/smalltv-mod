@@ -152,17 +152,11 @@
 #define YAHOO_CHART_PATH  "/v8/finance/chart/"
 #define YAHOO_USER_AGENT  "Mozilla/5.0 (SmallTV)"
 
-// Yahoo's other public endpoint, the one that actually carries marketState /
-// postMarketPrice / preMarketPrice (the v8 chart endpoint above doesn't — see
-// StockClient.cpp's extHours comment). No key, no account, same free-form GET
-// as the chart endpoint — but Yahoo has tightened bot-blocking on this one
-// harder than on /v8/finance/chart, so it may simply come back 401/403/999
-// depending on the day. Best-effort only: one extra fetch right after a
-// successful chart fetch, and if it fails, the symbol still shows its regular
-// chart-endpoint price exactly as before this existed.
-#define YAHOO_QUOTE_HOST1 "query1.finance.yahoo.com"
-#define YAHOO_QUOTE_HOST2 "query2.finance.yahoo.com"
-#define YAHOO_QUOTE_PATH  "/v7/finance/quote"
+// (Extended-hours pricing does NOT come from Yahoo at all — confirmed by
+// testing that neither the v8/chart endpoint above nor the v7/finance/quote
+// endpoint carries it for this device (the latter is flat-out 401'd). A
+// SymbolCfg.altSymbol hand-off to Binance is the only working path — see
+// BINANCE_HOST below and StockClient.cpp's SRC_YAHOO branch.)
 
 // Finnhub quote endpoint (SRC_FINNHUB). One plain GET per symbol, a ~120 B
 // JSON reply: current price (c), day change (d) and % (dp), day high/low (h/l),

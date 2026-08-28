@@ -128,10 +128,6 @@ static void handleStatus() {
     if (d.valid) {
       t["price"] = d.price;
       if (d.extHours) t["extHours"] = d.extLabel;
-      t["dbgMarketState"] = d.dbgMarketState;
-      t["dbgHasPostPrice"] = d.dbgHasPostPrice;
-      t["dbgHasPrePrice"] = d.dbgHasPrePrice;
-      t["dbgQuoteHttpCode"] = d.dbgQuoteHttpCode;
       float chg, pct;
       bool onRange = false;
       if (stockDisplayChange(d, S->ticker, chg, pct, &onRange)) {
