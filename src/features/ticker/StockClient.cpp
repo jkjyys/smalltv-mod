@@ -756,14 +756,24 @@ static uint8_t g_fetchPhase = 0;
 static bool stepSymbol(const Settings& s, StockData& d) {
   if (d.source == SRC_YAHOO) {
     // Off-hours hand-off to Binance (SymbolCfg.altSymbol) — see the US-hours
-    // helper above and config.h's BINANCE_HOST comment. Single-phase, like
-    // SRC_BINANCE below: skips the whole Yahoo chart/quote dance entirely
-    // while the US market's closed, and resumes it automatically (fresh
-    // sparkline included) the moment usMarketRegularHoursNow() flips back.
+    // helper above and config.h's BINANCE_HOST comment. Phased like
+    // SRC_BINANCE below (quote, then klines): skips the whole Yahoo
+    // chart/quote dance while the US market's closed, and resumes it
+    // automatically (fresh sparkline included) once usMarketRegularHoursNow()
+    // flips back.
     if (d.altSymbol[0] && !usMarketRegularHoursNow()) {
-      bool ok = fetchUrl(s, buildBinanceUrl(d.altSymbol), PARSE_BINANCE, d);
-      if (ok) { d.extHours = true; strlcpy(d.extLabel, "24/7", sizeof(d.extLabel)); }
-      else    d.error = true;
+      if (g_fetchPhase == 0) {
+        bool ok = fetchUrl(s, buildBinanceUrl(d.altSymbol), PARSE_BINANCE, d);
+        if (!ok) { d.error = true; return true; }
+        d.extHours = true;
+        strlcpy(d.extLabel, "24/7", sizeof(d.extLabel));
+        g_fetchPhase = 1;
+        return false;   // sparkline next tick — same one-request-per-tick rule as elsewhere
+      }
+      // phase 1: sparkline (from the Binance altSymbol), best-effort — a miss
+      // here isn't an error, `d` already has a valid price from phase 0.
+      if (s.ticker.showChart && s.ticker.points >= 2)
+        fetchUrl(s, buildBinanceKlinesUrl(s, d.altSymbol), PARSE_BINANCE_KLINES, d);
       return true;
     }
     if (g_fetchPhase == 0 || g_fetchPhase == 1) {
@@ -785,11 +795,17 @@ static bool stepSymbol(const Settings& s, StockData& d) {
       if (d.altSymbol[0] && stale) { g_fetchPhase = 3; return false; }
       return true;   // regular Yahoo price is good as-is — no more phases needed
     }
-    // phase 3: holiday hand-off — see the staleness check above
-    bool ok = fetchUrl(s, buildBinanceUrl(d.altSymbol), PARSE_BINANCE, d);
-    if (ok) { d.extHours = true; strlcpy(d.extLabel, "24/7", sizeof(d.extLabel)); }
-    // else: leave Yahoo's (stale but valid) price in place rather than erroring —
-    // still better than nothing, and next cycle tries fresh Yahoo data again anyway.
+    if (g_fetchPhase == 3) {   // holiday hand-off — see the staleness check above
+      bool ok = fetchUrl(s, buildBinanceUrl(d.altSymbol), PARSE_BINANCE, d);
+      if (!ok) return true;    // leave Yahoo's (stale but valid) price in place rather than erroring
+      d.extHours = true;
+      strlcpy(d.extLabel, "24/7", sizeof(d.extLabel));
+      g_fetchPhase = 4;
+      return false;   // sparkline next tick
+    }
+    // phase 4: sparkline for the holiday hand-off, same as phase 1 above.
+    if (s.ticker.showChart && s.ticker.points >= 2)
+      fetchUrl(s, buildBinanceKlinesUrl(s, d.altSymbol), PARSE_BINANCE_KLINES, d);
     return true;
   }
 
