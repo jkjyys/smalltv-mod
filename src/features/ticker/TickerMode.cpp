@@ -233,7 +233,13 @@ static void drawStock(const StockData& d, uint8_t pageIndex, uint8_t pageCount,
       else           snprintf(buf, sizeof(buf), "%lum", (unsigned long)(ago / 60));
     }
     if (s.ticker.showSource) {
-      const char* src = (d.source == SRC_YAHOO)   ? "YAHOO"
+      // extHours means the price on screen right now was actually fetched
+      // from Binance as a stand-in (see stepSymbol's SRC_YAHOO branch) — the
+      // configured source below (still "yahoo" in settings) would be
+      // misleading here, so this overrides it to say where the number
+      // actually came from this cycle, not what the ticker is configured as.
+      const char* src = d.extHours ? "BINANCE"
+                       : (d.source == SRC_YAHOO)   ? "YAHOO"
                        : (d.source == SRC_CASH)    ? "CASH.CH"
                        : (d.source == SRC_GHUB)    ? "GITHUB"
                        : (d.source == SRC_FINNHUB) ? "FINNHUB"
