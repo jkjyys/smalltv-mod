@@ -64,6 +64,12 @@ static uint8_t   g_count = 0;
 
 static bool     g_refreshing = false;
 static uint8_t  g_fetchIdx = 0;
+// A symbol may need several requests (Yahoo mirror retry; cash.ch quote, its
+// retry, then the chart). Each is a separate step so only ONE TLS handshake
+// runs per service() call: a full-BearSSL ECDHE handshake takes ~1 s on the
+// ESP8266, and chaining two or three in one loop() iteration starved the web
+// server and tripped the watchdog. g_fetchPhase tracks the step for g_fetchIdx.
+static uint8_t  g_fetchPhase = 0;
 
 // ---------------------------------------------------------------------------
 void stocksInit(const Settings& s) {
@@ -81,6 +87,16 @@ void stocksInit(const Settings& s) {
             MAX_NAME_LEN);
     g_stocks[i].nextTryMs = millis();     // every symbol is due right away
   }
+  // g_fetchIdx/g_fetchPhase must be reset here too: stocksInit() re-runs
+  // whenever settings are saved (TickerMode's begin()/invalidate()), not just
+  // at boot. If the symbol list just got SHORTER (e.g. a ticker deleted) and
+  // g_fetchIdx was left pointing past the new g_count, stocksService()'s
+  // "while (g_fetchIdx < g_count) ..." loop falls through immediately on
+  // every future call — g_fetchIdx never gets a chance to wrap back to 0, so
+  // every symbol silently stops updating forever (visible as a screen frozen
+  // on stale data, web UI still responsive) until the device is rebooted.
+  g_fetchIdx = 0;
+  g_fetchPhase = 0;
   g_refreshing = false;
 }
 
@@ -749,8 +765,8 @@ static bool fetchUrl(const Settings& s, const String& url, ParseKind kind, Stock
 // retry, then the chart). Each is a separate step so only ONE TLS handshake
 // runs per service() call: a full-BearSSL ECDHE handshake takes ~1 s on the
 // ESP8266, and chaining two or three in one loop() iteration starved the web
-// server and tripped the watchdog. g_fetchPhase tracks the step for g_fetchIdx.
-static uint8_t g_fetchPhase = 0;
+// server and tripped the watchdog. g_fetchPhase tracks the step for g_fetchIdx
+// (declared up near g_fetchIdx itself — stocksInit() needs to reset both).
 
 // Returns true when this symbol is finished (caller advances to the next).
 static bool stepSymbol(const Settings& s, StockData& d) {
