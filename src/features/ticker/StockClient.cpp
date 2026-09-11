@@ -89,6 +89,7 @@ void stocksInit(const Settings& s) {
     d.qty  = s.ticker.symbols[i].qty;
     d.cost = s.ticker.symbols[i].cost;
     strlcpy(d.altSymbol, s.ticker.symbols[i].altSymbol, MAX_SYMBOL_LEN);
+    d.pctUnit = s.ticker.symbols[i].pctUnit;
     d.userNamed = (s.ticker.symbols[i].name[0] != 0);
     strlcpy(d.name,
             d.userNamed ? s.ticker.symbols[i].name : s.ticker.symbols[i].symbol,

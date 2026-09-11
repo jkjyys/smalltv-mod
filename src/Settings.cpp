@@ -52,6 +52,7 @@ void TickerSettings::setDefaults() {
     symbols[i].cost = 0;
     symbols[i].altSymbol[0] = 0;
     symbols[i].hidden = false;
+    symbols[i].pctUnit = false;
   }
 }
 
@@ -85,6 +86,7 @@ void TickerSettings::toJson(JsonObject o) const {
     e["cost"]   = symbols[i].cost;
     e["altSymbol"] = symbols[i].altSymbol;
     e["hidden"]    = symbols[i].hidden;
+    e["pctUnit"]   = symbols[i].pctUnit;
   }
 }
 
@@ -132,6 +134,7 @@ void TickerSettings::fromJson(JsonObjectConst o) {
       dst.cost = e["cost"].as<float>();
       strlcpy(dst.altSymbol, e["altSymbol"] | "", MAX_SYMBOL_LEN);
       dst.hidden = e["hidden"] | false;
+      dst.pctUnit = e["pctUnit"] | false;
       if (dst.qty < 0)  dst.qty = 0;
       if (dst.cost < 0) dst.cost = 0;
       symbolCount++;

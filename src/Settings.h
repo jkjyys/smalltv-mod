@@ -24,6 +24,9 @@ struct SymbolCfg {
                       // but skipped entirely on-device: no fetch, no display page, no
                       // portfolio-total contribution. Toggle back on to pick up right
                       // where it left off, instead of re-typing the whole row.
+  bool    pctUnit;    // display as "X.XX%" instead of currency+price — for symbols like
+                      // ^TNX (10-year Treasury yield) where Yahoo's own currency field
+                      // says USD even though the number is a rate, not a price.
 };
 
 // A home-area airport marker (radar feature), configured in the web UI.

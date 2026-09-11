@@ -539,7 +539,7 @@ function symHintFor(v){var h=$('symHint');if(!h)return;
   ?'<b>GitHub</b>: reads a listing key\'s quote from a small static JSON published to a repo\'s <code>data</code> branch (a proxy for cash.ch on chips that can\'t reach it directly). The symbol is the cash.ch listing key. You publish the files yourself from a fork &mdash; the repo ships the example fetcher (<code>fetch-quotes.mjs</code> + <code>quotes-config.json</code>); see the docs.'
   :v==='webhook'
   ?'<b>Webhook</b>: the device asks the webhook URL above and passes the symbol through as-is, so use whatever your endpoint understands.'
-  :'<b>Yahoo Finance</b>: fetched directly by the device. Use Yahoo symbols: <code>AAPL</code>, <code>NESN.SW</code> (Swiss stocks end in <code>.SW</code>), <code>BTC-USD</code>, <code>EURUSD=X</code>. Optionally set the <b>off-hrs (Binance)</b> field to a Binance symbol (e.g. <code>INTCUSDT</code>) for a US stock Binance has listed as a perpetual &mdash; outside 9:30-16:00 ET the device switches to that continuously-traded price automatically (badged <code>24/7</code>), then back to Yahoo when the regular session reopens. No sparkline while showing the Binance price.')
+  :'<b>Yahoo Finance</b>: fetched directly by the device. Use Yahoo symbols: <code>AAPL</code>, <code>NESN.SW</code> (Swiss stocks end in <code>.SW</code>), <code>BTC-USD</code>, <code>EURUSD=X</code>. Optionally set the <b>off-hrs (Binance)</b> field to a Binance symbol (e.g. <code>INTCUSDT</code>) for a US stock Binance has listed as a perpetual &mdash; outside 9:30-16:00 ET the device switches to that continuously-traded price automatically (badged <code>24/7</code>), then back to Yahoo when the regular session reopens. No sparkline while showing the Binance price. The <b>%</b> checkbox shows the number as a percentage instead of a currency price &mdash; useful for a rate/yield symbol like <code>^TNX</code> (10-year Treasury yield), which Yahoo tags as USD even though it isn\'t a price.')
   +' Name is optional; if set it overrides the source\'s name. Qty and per-unit cost are optional too: set both and the ticker shows your P/L plus a portfolio summary page.';}
 
 // cash.ch symbol finder: runs in YOUR browser (cash.ch answers cross-origin),
@@ -617,6 +617,7 @@ function collect(){
    var s=tr.querySelector('.s').value.trim();
    if(s)t.symbols.push({symbol:s,name:tr.querySelector('.n').value.trim(),source:tr.querySelector('.src').value,
     altSymbol:tr.querySelector('.alt').value.trim(),hidden:tr.querySelector('.hid').checked,
+    pctUnit:tr.querySelector('.pct').checked,
     qty:parseFloat(tr.querySelector('.q').value)||0,cost:parseFloat(tr.querySelector('.c').value)||0});
   });
   o.ticker=t;
@@ -687,6 +688,7 @@ function addRow(o){var t=$('symTable');var tr=document.createElement('tr');tr.cl
   '<td style="width:118px"><select class="src" onchange="symHintFor(this.value)">'+
    '<option value="yahoo">Yahoo Finance</option><option value="cash">cash.ch</option><option value="github">GitHub</option><option value="finnhub">Finnhub</option><option value="binance">Binance (24/7, no key)</option><option value="webhook">Webhook</option></select></td>'+
   '<td style="width:100px"><input class="alt" type="text" placeholder="off-hrs (Binance)" value="'+esc(o.altSymbol||'')+'" title="Yahoo symbols only: a Binance symbol (e.g. INTCUSDT) to switch to outside US market hours"></td>'+
+  '<td style="width:30px"><input class="pct" type="checkbox" title="Show as X.XX% instead of a currency price — for rate/yield symbols like ^TNX"'+(o.pctUnit?' checked':'')+'></td>'+
   '<td style="width:58px"><input class="q" type="number" step="any" min="0" placeholder="qty" value="'+(o.qty>0?o.qty:'')+'"></td>'+
   '<td style="width:70px"><input class="c" type="number" step="any" min="0" placeholder="cost" value="'+(o.cost>0?o.cost:'')+'"></td>'+
   '<td style="width:34px"><button class="btn sec" style="padding:6px 10px" onclick="this.closest(\'tr\').remove()">&times;</button></td>';

@@ -121,7 +121,8 @@ static void drawStock(const StockData& d, uint8_t pageIndex, uint8_t pageCount,
     char num[20];
     fmtPrice(d.price, num, sizeof(num));
     char line[28];
-    snprintf(line, sizeof(line), "%s%s", d.currency, num);
+    if (d.pctUnit) snprintf(line, sizeof(line), "%s%%", num);          // e.g. "^TNX" (10Y yield): a rate, not a price — Yahoo's own currency field says USD anyway
+    else           snprintf(line, sizeof(line), "%s%s", d.currency, num);
     // Capped at 4 (not gfxFitSize's usual max of 6): a short price like a
     // 2-digit stock otherwise renders noticeably larger than a longer one
     // like a BTC price or an FX rate, purely because it has more room to
@@ -138,7 +139,8 @@ static void drawStock(const StockData& d, uint8_t pageIndex, uint8_t pageCount,
     // yahooCurrency() marks that case with exactly "$", never any other code.
     // Plain ASCII text, no ≈/₩ glyphs: the built-in font is ASCII-only, same
     // reason the Currency ticker itself prints "KRW 1386.43", not a symbol.
-    if (s.ticker.showKrw && !strcmp(d.currency, "$")) {
+    // Skipped for pctUnit symbols too — a yield isn't a price to convert.
+    if (s.ticker.showKrw && !d.pctUnit && !strcmp(d.currency, "$")) {
       float rate = fxUsdKrw();
       if (rate > 0) {
         char won[20];
