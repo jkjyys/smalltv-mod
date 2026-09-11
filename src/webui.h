@@ -616,7 +616,7 @@ function collect(){
   document.querySelectorAll('#symTable tr').forEach(function(tr){
    var s=tr.querySelector('.s').value.trim();
    if(s)t.symbols.push({symbol:s,name:tr.querySelector('.n').value.trim(),source:tr.querySelector('.src').value,
-    altSymbol:tr.querySelector('.alt').value.trim(),
+    altSymbol:tr.querySelector('.alt').value.trim(),hidden:tr.querySelector('.hid').checked,
     qty:parseFloat(tr.querySelector('.q').value)||0,cost:parseFloat(tr.querySelector('.c').value)||0});
   });
   o.ticker=t;
@@ -681,7 +681,8 @@ function scanPick(ssid){var rows=document.querySelectorAll('#wifiTable tr');var 
 // symbols
 function renderSyms(arr){var t=$('symTable');if(!t)return;t.innerHTML='';arr.forEach(addRow);if(!arr.length)addRow({})}
 function addRow(o){var t=$('symTable');var tr=document.createElement('tr');tr.className='symrow';
- tr.innerHTML='<td style="width:20%"><input class="s" type="text" placeholder="AAPL" value="'+esc(o.symbol||'')+'"></td>'+
+ tr.innerHTML='<td style="width:34px"><input class="hid" type="checkbox" title="Hide from display — kept in settings, just skipped (no fetch, no page)"'+(o.hidden?' checked':'')+'></td>'+
+  '<td style="width:20%"><input class="s" type="text" placeholder="AAPL" value="'+esc(o.symbol||'')+'"></td>'+
   '<td><input class="n" type="text" placeholder="name" value="'+esc(o.name||'')+'"></td>'+
   '<td style="width:118px"><select class="src" onchange="symHintFor(this.value)">'+
    '<option value="yahoo">Yahoo Finance</option><option value="cash">cash.ch</option><option value="github">GitHub</option><option value="finnhub">Finnhub</option><option value="binance">Binance (24/7, no key)</option><option value="webhook">Webhook</option></select></td>'+

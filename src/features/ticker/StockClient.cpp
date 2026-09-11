@@ -73,28 +73,37 @@ static uint8_t  g_fetchPhase = 0;
 
 // ---------------------------------------------------------------------------
 void stocksInit(const Settings& s) {
-  g_count = s.ticker.symbolCount;
-  for (uint8_t i = 0; i < g_count; i++) {
-    g_stocks[i].clear();
-    strlcpy(g_stocks[i].symbol, s.ticker.symbols[i].symbol, MAX_SYMBOL_LEN);
-    g_stocks[i].source = s.ticker.symbols[i].source;
-    g_stocks[i].qty  = s.ticker.symbols[i].qty;
-    g_stocks[i].cost = s.ticker.symbols[i].cost;
-    strlcpy(g_stocks[i].altSymbol, s.ticker.symbols[i].altSymbol, MAX_SYMBOL_LEN);
-    g_stocks[i].userNamed = (s.ticker.symbols[i].name[0] != 0);
-    strlcpy(g_stocks[i].name,
-            g_stocks[i].userNamed ? s.ticker.symbols[i].name : s.ticker.symbols[i].symbol,
+  // Hidden symbols (SymbolCfg.hidden) are skipped here entirely — never added
+  // to g_stocks — rather than added-but-flagged: that's what makes them cost
+  // nothing (no fetch, no display page, no portfolio-total contribution)
+  // instead of just being invisible while still polling in the background.
+  // Their settings (symbol/name/qty/cost/altSymbol) stay untouched in
+  // Settings.ticker.symbols[], so re-enabling picks up right where it left off.
+  g_count = 0;
+  for (uint8_t i = 0; i < s.ticker.symbolCount; i++) {
+    if (s.ticker.symbols[i].hidden) continue;
+    StockData& d = g_stocks[g_count++];
+    d.clear();
+    strlcpy(d.symbol, s.ticker.symbols[i].symbol, MAX_SYMBOL_LEN);
+    d.source = s.ticker.symbols[i].source;
+    d.qty  = s.ticker.symbols[i].qty;
+    d.cost = s.ticker.symbols[i].cost;
+    strlcpy(d.altSymbol, s.ticker.symbols[i].altSymbol, MAX_SYMBOL_LEN);
+    d.userNamed = (s.ticker.symbols[i].name[0] != 0);
+    strlcpy(d.name,
+            d.userNamed ? s.ticker.symbols[i].name : s.ticker.symbols[i].symbol,
             MAX_NAME_LEN);
-    g_stocks[i].nextTryMs = millis();     // every symbol is due right away
+    d.nextTryMs = millis();     // every symbol is due right away
   }
   // g_fetchIdx/g_fetchPhase must be reset here too: stocksInit() re-runs
   // whenever settings are saved (TickerMode's begin()/invalidate()), not just
-  // at boot. If the symbol list just got SHORTER (e.g. a ticker deleted) and
-  // g_fetchIdx was left pointing past the new g_count, stocksService()'s
-  // "while (g_fetchIdx < g_count) ..." loop falls through immediately on
-  // every future call — g_fetchIdx never gets a chance to wrap back to 0, so
-  // every symbol silently stops updating forever (visible as a screen frozen
-  // on stale data, web UI still responsive) until the device is rebooted.
+  // at boot. If the symbol list just got SHORTER (e.g. a ticker deleted or
+  // hidden) and g_fetchIdx was left pointing past the new g_count,
+  // stocksService()'s "while (g_fetchIdx < g_count) ..." loop falls through
+  // immediately on every future call — g_fetchIdx never gets a chance to wrap
+  // back to 0, so every symbol silently stops updating forever (visible as a
+  // screen frozen on stale data, web UI still responsive) until the device
+  // is rebooted.
   g_fetchIdx = 0;
   g_fetchPhase = 0;
   g_refreshing = false;
@@ -959,6 +968,6 @@ void stocksService(const Settings& s) {
 
 bool tickerNeedsClock(const Settings& s) {
   for (uint8_t i = 0; i < s.ticker.symbolCount; i++)
-    if (s.ticker.symbols[i].source == SRC_YAHOO && s.ticker.symbols[i].altSymbol[0]) return true;
+    if (!s.ticker.symbols[i].hidden && s.ticker.symbols[i].source == SRC_YAHOO && s.ticker.symbols[i].altSymbol[0]) return true;
   return false;
 }

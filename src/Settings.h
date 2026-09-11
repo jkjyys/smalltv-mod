@@ -20,6 +20,10 @@ struct SymbolCfg {
   char    altSymbol[MAX_SYMBOL_LEN];  // Binance symbol (e.g. "INTCUSDT") to switch to
                                       // outside US regular trading hours; "" disables this.
                                       // Only meaningful when source == SRC_YAHOO.
+  bool    hidden;     // kept in settings (symbol/name/qty/cost/altSymbol all preserved)
+                      // but skipped entirely on-device: no fetch, no display page, no
+                      // portfolio-total contribution. Toggle back on to pick up right
+                      // where it left off, instead of re-typing the whole row.
 };
 
 // A home-area airport marker (radar feature), configured in the web UI.
