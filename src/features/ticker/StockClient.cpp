@@ -711,7 +711,13 @@ static bool fetchUrl(const Settings& s, const String& url, ParseKind kind, Stock
       if (platformMaxFreeBlock() < 16000) { d.dbgLastHttpCode = -1000; return false; }   // largest contiguous block, not total
       client.reset(platformMakeSecureClient(512, &g_cashSession, 512, /*cheapCiphers=*/false));
     } else if (finnhub || binance) {
-      if (platformMaxFreeBlock() < 16000) { d.dbgLastHttpCode = -1000; return false; }
+      // Lowered from the original 16000: months of /api/status samples never
+      // once showed a crash from attempting this handshake, just repeated
+      // skips whenever maxblk sat in the 14000s — a healthy value on this
+      // device, just short of the original (guessed, not measured) margin.
+      // Two hybrid tickers (Yahoo + off-hours Binance) needing this same gate
+      // at once made the old margin fail often enough to be a real nuisance.
+      if (platformMaxFreeBlock() < 13500) { d.dbgLastHttpCode = -1000; return false; }
       client.reset(platformMakeSecureClient(5120, nullptr, 512, /*cheapCiphers=*/false));
     } else {
       // raw.githubusercontent.com sends a ~4 KB cert record and won't negotiate
