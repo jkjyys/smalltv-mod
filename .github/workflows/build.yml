@@ -63,23 +63,60 @@ jobs:
       - name: Install PlatformIO
         run: pip install --upgrade platformio
 
-      - name: Build firmware (all targets)
-        run: pio run -e smalltv -e smalltv_c2 -e smalltv_esp32 -e smalltv_esp32_8mb -e smalltv_loader
+      # Each target builds independently instead of one `pio run -e a -e b ...`
+      # call, because smalltv_c2 currently fails in this environment on its own
+      # (pre-existing: "ModuleNotFoundError: No module named
+      # 'SCons.Tool.FortranCommon'" — a PlatformIO/SCons/ESP-IDF tooling
+      # mismatch on the espidf+arduino framework combo that target uses, not
+      # something this PR introduced; the same failure already happens on
+      # main). A single combined `pio run` call aborts the whole step — and
+      # with it the release below — the moment any one environment fails,
+      # which would mean this workflow's own auto-release step never runs for
+      # ANY target, including smalltv, the one this fork's actual hardware
+      # (SmallTV-Ultra) ships on. Building targets one at a time and
+      # continuing past a failure keeps a release flowing for whichever
+      # targets did build; the one that matters for the auto-updater
+      # (smalltv) still hard-fails the job if it doesn't build, since a
+      # release with no smalltv asset is worse than no release at all.
+      - name: Build firmware (per target, continue past a broken one)
+        run: |
+          set +e
+          FAILED=""
+          for env in smalltv smalltv_loader smalltv_esp32 smalltv_esp32_8mb smalltv_c2; do
+            echo "::group::pio run -e $env"
+            pio run -e "$env"
+            rc=$?
+            echo "::endgroup::"
+            if [ $rc -ne 0 ]; then
+              FAILED="$FAILED $env"
+              echo "::warning::$env failed to build (exit $rc) — its asset is left out of this release."
+            fi
+          done
+          if [ -n "$FAILED" ]; then
+            echo "Failed environments:$FAILED"
+          fi
+          if [ ! -f .pio/build/smalltv/firmware.bin ]; then
+            echo "::error::smalltv (SmallTV-Ultra, the target this fork's auto-updater installs) failed to build."
+            exit 1
+          fi
 
       # One app image per target (web-UI OTA + GitHub self-update), the merged
       # factory images for first-time USB flashing of the ESP32 boards, and the
-      # minimal loader used to install onto a SmallTV-ultra.
+      # minimal loader used to install onto a SmallTV-ultra. A target skipped
+      # above (see the build step's comment) just leaves its files out here
+      # rather than failing the whole job.
       - name: Stage artifacts
         run: |
           mkdir -p dist
-          cp .pio/build/smalltv/firmware.bin               dist/smalltv-mod-firmware.bin
-          cp .pio/build/smalltv_c2/firmware.bin            dist/smalltv-mod-firmware-c2.bin
-          cp .pio/build/smalltv_c2/firmware.factory.bin    dist/smalltv-mod-firmware-c2.factory.bin
-          cp .pio/build/smalltv_esp32/firmware.bin         dist/smalltv-mod-firmware-esp32.bin
-          cp .pio/build/smalltv_esp32/firmware.factory.bin dist/smalltv-mod-firmware-esp32.factory.bin
-          cp .pio/build/smalltv_esp32_8mb/firmware.bin         dist/smalltv-mod-firmware-esp32-pro.bin
-          cp .pio/build/smalltv_esp32_8mb/firmware.factory.bin dist/smalltv-mod-firmware-esp32-pro.factory.bin
-          cp .pio/build/smalltv_loader/firmware.bin        dist/smalltv-mod-loader.bin
+          cp .pio/build/smalltv/firmware.bin dist/smalltv-mod-firmware.bin
+          [ -f .pio/build/smalltv_c2/firmware.bin ] && cp .pio/build/smalltv_c2/firmware.bin dist/smalltv-mod-firmware-c2.bin
+          [ -f .pio/build/smalltv_c2/firmware.factory.bin ] && cp .pio/build/smalltv_c2/firmware.factory.bin dist/smalltv-mod-firmware-c2.factory.bin
+          [ -f .pio/build/smalltv_esp32/firmware.bin ] && cp .pio/build/smalltv_esp32/firmware.bin dist/smalltv-mod-firmware-esp32.bin
+          [ -f .pio/build/smalltv_esp32/firmware.factory.bin ] && cp .pio/build/smalltv_esp32/firmware.factory.bin dist/smalltv-mod-firmware-esp32.factory.bin
+          [ -f .pio/build/smalltv_esp32_8mb/firmware.bin ] && cp .pio/build/smalltv_esp32_8mb/firmware.bin dist/smalltv-mod-firmware-esp32-pro.bin
+          [ -f .pio/build/smalltv_esp32_8mb/firmware.factory.bin ] && cp .pio/build/smalltv_esp32_8mb/firmware.factory.bin dist/smalltv-mod-firmware-esp32-pro.factory.bin
+          [ -f .pio/build/smalltv_loader/firmware.bin ] && cp .pio/build/smalltv_loader/firmware.bin dist/smalltv-mod-loader.bin
+          ls -la dist/
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
