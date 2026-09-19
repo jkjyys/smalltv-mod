@@ -343,13 +343,18 @@ small.hint{display:block;color:var(--mut);margin-top:4px;font-size:12px}
    </div>
    <div id="ghMsg" class="muted" style="margin-top:8px"></div>
    <small class="hint">Pulls the newest release straight from <a id="repoLink" href="https://github.com/giovi321/smalltv-mod/releases" target="_blank">the GitHub repo</a>. HTTPS OTA is tight on the ESP8266; if it fails, use the manual upload below.</small>
+   <div class="chk" style="margin-top:14px"><input id="autoUpdateEnabled" type="checkbox"><label>Check automatically and install newer releases on its own</label></div>
+   <div class="row">
+    <div><label>Check every (hours)</label><input id="autoUpdateHours" type="number" min="1" max="168"></div>
+   </div>
+   <small class="hint">Runs the same check-and-install as "Update now", on its own schedule — push to GitHub, and the device catches up within this interval. The device reboots if it installs an update. Turn this off to only update by pressing the button above.</small>
   </div>
   <div class="card"><h2>Manual update (OTA)</h2>
    <input id="fw" type="file" accept=".bin">
    <div style="margin-top:12px"><button class="btn" onclick="upload()" id="upBtn">Upload &amp; flash</button></div>
    <div class="bar"><div id="upBar"></div></div>
    <div id="upMsg" class="muted" style="margin-top:8px"></div>
-   <small class="hint">Upload a firmware.bin from the <a href="https://github.com/giovi321/smalltv-mod/releases" target="_blank">releases page</a> or a local build. The device reboots when done.</small>
+   <small class="hint">Upload a firmware.bin from the <a id="manualRelLink" href="https://github.com/giovi321/smalltv-mod/releases" target="_blank">releases page</a> or a local build. The device reboots when done.</small>
   </div>
   <div class="card"><h2>Settings backup</h2>
    <button class="btn sec" onclick="location.href='/api/export'">Export settings</button>
@@ -472,6 +477,7 @@ function loadConfig(){return j('/api/config').then(function(c){C=c;
  $('rotation').value=c.rotation;
  $('autoBrightness').checked=!!c.autoBrightness;
  $('backlightInverted').checked=!!c.backlightInverted;
+ sc('autoUpdateEnabled',c.autoUpdateEnabled!==false); sv('autoUpdateHours',c.autoUpdateHours||24);
  // panel colour slice
  var dp=c.display||{};
  sv('colorOrder',dp.colorOrder||'auto'); sc('colorInvert',!!dp.invert);
@@ -583,6 +589,8 @@ function collect(){
   rotation:parseInt(gv('rotation')),
   autoBrightness:gc('autoBrightness'),
   backlightInverted:gc('backlightInverted'),
+  autoUpdateEnabled:gc('autoUpdateEnabled'),
+  autoUpdateHours:parseInt(gv('autoUpdateHours'))||24,
   hostname:gv('hostname'), apSsid:gv('apSsid'),
   display:{colorOrder:gv('colorOrder')||'auto', invert:gc('colorInvert'),
    rGain:parseInt(gv('rGain'))||100, gGain:parseInt(gv('gGain'))||100, bGain:parseInt(gv('bGain'))||100},
@@ -724,7 +732,8 @@ function loadStatus(){j('/api/status').then(function(s){
  // System tab was closed. Don't clobber an in-progress check/update message.
  if(!window._otaShown){window._otaShown=1;var gm=$('ghMsg');if(gm&&!gm.textContent&&s.updateMsg&&s.updateMsg!=='updating...')gm.textContent='Last update: '+s.updateMsg}
  var fv=$('footVer'); if(fv)fv.textContent=' v'+s.version;
- if(s.repo){var rl=$('repoLink'); if(rl)rl.href=s.repo+'/releases'; var fr=$('footRepo'); if(fr)fr.href=s.repo;}
+ if(s.repo){var rl=$('repoLink'); if(rl)rl.href=s.repo+'/releases'; var fr=$('footRepo'); if(fr)fr.href=s.repo;
+  var mr=$('manualRelLink'); if(mr)mr.href=s.repo+'/releases';}
  $('statusBox').innerHTML=
   kv('Firmware',s.fw+' '+s.version)+kv('Mode',s.mode.toUpperCase())+
   kv('Network',s.ssid||'-')+kv('IP',s.ip||'-')+kv('mDNS','http://'+(C.hostname||'smalltv')+'.local')+

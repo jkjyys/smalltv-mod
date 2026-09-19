@@ -18,6 +18,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Auto-versioning: every push to main bumps config.h's patch version,
+      # commits it back, and tags it — so a release always exists for the
+      # on-device auto-updater to find, with no manual `git tag`/`git push
+      # --tags` step. Runs before the build below so the version baked into
+      # the compiled binary matches the tag it ships under (otherwise the
+      # device would keep seeing a "newer" release forever: the release tag
+      # advances but the binary it points to would still report the old
+      # version). This has to commit+tag+release in THIS run rather than push
+      # a tag and rely on that push re-triggering the workflow: pushes made
+      # with the default GITHUB_TOKEN intentionally do not start new workflow
+      # runs (GitHub's own loop guard), so that design would tag a version
+      # and then silently never build or release it.
+      - name: Bump version and tag
+        id: bump
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          CUR=$(grep -oP '(?<=#define FW_VERSION  ")[0-9]+\.[0-9]+\.[0-9]+' src/config.h)
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CUR"
+          NEXT="$MAJOR.$MINOR.$((PATCH + 1))"
+          sed -i -E "s/(#define FW_VERSION[[:space:]]+\")[0-9]+\.[0-9]+\.[0-9]+(\")/\1$NEXT\2/" src/config.h
+          git add src/config.h
+          git commit -m "chore: bump version to v$NEXT"
+          git tag "v$NEXT"
+          git push origin HEAD:main
+          git push origin "v$NEXT"
+          echo "tag=v$NEXT" >> "$GITHUB_OUTPUT"
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -33,23 +63,60 @@ jobs:
       - name: Install PlatformIO
         run: pip install --upgrade platformio
 
-      - name: Build firmware (all targets)
-        run: pio run -e smalltv -e smalltv_c2 -e smalltv_esp32 -e smalltv_esp32_8mb -e smalltv_loader
+      # Each target builds independently instead of one `pio run -e a -e b ...`
+      # call, because smalltv_c2 currently fails in this environment on its own
+      # (pre-existing: "ModuleNotFoundError: No module named
+      # 'SCons.Tool.FortranCommon'" — a PlatformIO/SCons/ESP-IDF tooling
+      # mismatch on the espidf+arduino framework combo that target uses, not
+      # something this PR introduced; the same failure already happens on
+      # main). A single combined `pio run` call aborts the whole step — and
+      # with it the release below — the moment any one environment fails,
+      # which would mean this workflow's own auto-release step never runs for
+      # ANY target, including smalltv, the one this fork's actual hardware
+      # (SmallTV-Ultra) ships on. Building targets one at a time and
+      # continuing past a failure keeps a release flowing for whichever
+      # targets did build; the one that matters for the auto-updater
+      # (smalltv) still hard-fails the job if it doesn't build, since a
+      # release with no smalltv asset is worse than no release at all.
+      - name: Build firmware (per target, continue past a broken one)
+        run: |
+          set +e
+          FAILED=""
+          for env in smalltv smalltv_loader smalltv_esp32 smalltv_esp32_8mb smalltv_c2; do
+            echo "::group::pio run -e $env"
+            pio run -e "$env"
+            rc=$?
+            echo "::endgroup::"
+            if [ $rc -ne 0 ]; then
+              FAILED="$FAILED $env"
+              echo "::warning::$env failed to build (exit $rc) — its asset is left out of this release."
+            fi
+          done
+          if [ -n "$FAILED" ]; then
+            echo "Failed environments:$FAILED"
+          fi
+          if [ ! -f .pio/build/smalltv/firmware.bin ]; then
+            echo "::error::smalltv (SmallTV-Ultra, the target this fork's auto-updater installs) failed to build."
+            exit 1
+          fi
 
       # One app image per target (web-UI OTA + GitHub self-update), the merged
       # factory images for first-time USB flashing of the ESP32 boards, and the
-      # minimal loader used to install onto a SmallTV-ultra.
+      # minimal loader used to install onto a SmallTV-ultra. A target skipped
+      # above (see the build step's comment) just leaves its files out here
+      # rather than failing the whole job.
       - name: Stage artifacts
         run: |
           mkdir -p dist
-          cp .pio/build/smalltv/firmware.bin               dist/smalltv-mod-firmware.bin
-          cp .pio/build/smalltv_c2/firmware.bin            dist/smalltv-mod-firmware-c2.bin
-          cp .pio/build/smalltv_c2/firmware.factory.bin    dist/smalltv-mod-firmware-c2.factory.bin
-          cp .pio/build/smalltv_esp32/firmware.bin         dist/smalltv-mod-firmware-esp32.bin
-          cp .pio/build/smalltv_esp32/firmware.factory.bin dist/smalltv-mod-firmware-esp32.factory.bin
-          cp .pio/build/smalltv_esp32_8mb/firmware.bin         dist/smalltv-mod-firmware-esp32-pro.bin
-          cp .pio/build/smalltv_esp32_8mb/firmware.factory.bin dist/smalltv-mod-firmware-esp32-pro.factory.bin
-          cp .pio/build/smalltv_loader/firmware.bin        dist/smalltv-mod-loader.bin
+          cp .pio/build/smalltv/firmware.bin dist/smalltv-mod-firmware.bin
+          [ -f .pio/build/smalltv_c2/firmware.bin ] && cp .pio/build/smalltv_c2/firmware.bin dist/smalltv-mod-firmware-c2.bin
+          [ -f .pio/build/smalltv_c2/firmware.factory.bin ] && cp .pio/build/smalltv_c2/firmware.factory.bin dist/smalltv-mod-firmware-c2.factory.bin
+          [ -f .pio/build/smalltv_esp32/firmware.bin ] && cp .pio/build/smalltv_esp32/firmware.bin dist/smalltv-mod-firmware-esp32.bin
+          [ -f .pio/build/smalltv_esp32/firmware.factory.bin ] && cp .pio/build/smalltv_esp32/firmware.factory.bin dist/smalltv-mod-firmware-esp32.factory.bin
+          [ -f .pio/build/smalltv_esp32_8mb/firmware.bin ] && cp .pio/build/smalltv_esp32_8mb/firmware.bin dist/smalltv-mod-firmware-esp32-pro.bin
+          [ -f .pio/build/smalltv_esp32_8mb/firmware.factory.bin ] && cp .pio/build/smalltv_esp32_8mb/firmware.factory.bin dist/smalltv-mod-firmware-esp32-pro.factory.bin
+          [ -f .pio/build/smalltv_loader/firmware.bin ] && cp .pio/build/smalltv_loader/firmware.bin dist/smalltv-mod-loader.bin
+          ls -la dist/
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -60,10 +127,13 @@ jobs:
       # generate_release_notes fills the body with the commits and PRs since the
       # previous tag, so a release is never published blank. Editing the release
       # afterwards to write proper notes keeps whatever you put there: the action
-      # only sets the body when it creates the release.
+      # only sets the body when it creates the release. tag_name is left unset
+      # for a manually-pushed vX.Y.Z tag (the bump step above skips, so its
+      # output is empty) — the action then falls back to the tag from the ref.
       - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.bump.outputs.tag }}
           files: dist/*
           generate_release_notes: true
