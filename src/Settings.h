@@ -205,7 +205,7 @@ struct Settings {
 
   // --- Carousel (mode == MODE_CAROUSEL): dwell + which features rotate ---
   uint16_t carouselSec;
-  bool carouselTicker, carouselUsage, carouselRadar, carouselWeather;
+  bool carouselTicker, carouselUsage, carouselRadar, carouselWeather, carouselClock;
 
   // --- Shared HTTP / display ---
   uint16_t httpTimeout; // ms
@@ -213,10 +213,6 @@ struct Settings {
   bool     autoBrightness;    // use LDR on A0
   bool     backlightInverted; // active-low backlight
   uint8_t  rotation;          // 0..3 screen orientation
-
-  // --- Firmware self-update (System tab) ---
-  bool     autoUpdateEnabled; // periodically check GitHub and install a newer release
-  uint8_t  autoUpdateHours;   // how often to check, in hours
 
   // --- Feature slices ---
   TickerSettings  ticker;

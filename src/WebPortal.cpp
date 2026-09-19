@@ -24,11 +24,6 @@ static bool             g_reboot = false;
 static uint32_t         g_rebootAt = 0;
 static bool             g_selfUpdate = false;   // GitHub self-update requested
 static String           g_updateMsg;            // last self-update status/error
-static uint32_t         g_lastAutoCheckMs = 0;   // millis() of the last periodic check
-static bool             g_autoCheckedOnce = false;
-// Wait a bit after boot before the first periodic check so it doesn't compete
-// with the initial WiFi/data fetch for heap and airtime.
-static const uint32_t   AUTO_UPDATE_FIRST_DELAY_MS = 5UL * 60UL * 1000UL;
 
 static void scheduleReboot(uint32_t inMs) {
   g_reboot = true;
@@ -76,6 +71,7 @@ static void handleGetConfig() {
   feat["usage"]  = (bool)WITH_USAGE;
   feat["radar"]  = (bool)WITH_RADAR;
   feat["weather"] = (bool)WITH_WEATHER;
+  feat["clock"]   = (bool)WITH_CLOCK;
   // WireGuard is a per-chip decision rather than a per-feature one: it is
   // compiled only where the image has room for it (the ESP32-C2 build).
 #if defined(SMALLTV_WIREGUARD)
@@ -434,23 +430,6 @@ void webPortalBegin(Settings& settings) {
 
 void webPortalLoop() {
   server.handleClient();
-
-  // Periodic auto-update: arms the same flag the "Update now" button sets, so
-  // it reuses that exact check-then-install flow below (and its ESP8266
-  // boot-queue / ESP32 in-place split) with no separate code path of its own.
-  if (S->autoUpdateEnabled && !g_selfUpdate) {
-    uint32_t nowMs = millis();
-    if (!g_autoCheckedOnce) {
-      if (nowMs >= AUTO_UPDATE_FIRST_DELAY_MS) {
-        g_autoCheckedOnce = true;
-        g_lastAutoCheckMs = nowMs;
-        g_selfUpdate = true;
-      }
-    } else if (nowMs - g_lastAutoCheckMs >= (uint32_t)S->autoUpdateHours * 3600UL * 1000UL) {
-      g_lastAutoCheckMs = nowMs;
-      g_selfUpdate = true;
-    }
-  }
 
   // Run the GitHub self-update outside the request handler so the browser gets its
   // response first.
