@@ -195,10 +195,23 @@ void otaBootUpdate(const Settings& s) {
   if (!r.newer) { otaBootResult(F("already up to date (" FW_VERSION ")")); return; }
 
   // Honest guard: rx + tx buffers plus BearSSL engine/stack-thunk overhead.
-  const uint32_t need = 16384 + 512 + 8000;
-  if (ESP.getFreeHeap() < need || ESP.getMaxFreeBlockSize() < 16384 + 1024) {
+  const uint32_t need    = 16384 + 512 + 8000;
+  const uint32_t needBlk = 16384 + 1024;
+  // Total free heap can clear `need` while the heap is fragmented enough that
+  // no single block is big enough for the 16 KB TLS buffer — WiFi association
+  // and the check above's own HTTPS request each leave short-lived allocations
+  // behind. A few delay()s (which service the WiFi/lwIP stack) give those a
+  // moment to be freed and the allocator a moment to coalesce; cheap, and it's
+  // one throwaway boot attempt either way if it doesn't help.
+  for (int tries = 0; tries < 5; tries++) {
+    if (ESP.getFreeHeap() >= need && ESP.getMaxFreeBlockSize() >= needBlk) break;
+    delay(200);
+  }
+  if (ESP.getFreeHeap() < need || ESP.getMaxFreeBlockSize() < needBlk) {
     otaBootResult("not enough heap even at boot (" + String(ESP.getFreeHeap()) +
-                  " free, need " + String(need) + ")");
+                  " free, " + String(ESP.getMaxFreeBlockSize()) +
+                  " largest block, need " + String(need) + " free / " +
+                  String(needBlk) + " contiguous)");
     return;
   }
 
