@@ -18,6 +18,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Auto-versioning: every push to main bumps config.h's patch version,
+      # commits it back, and tags it — so a release always exists for the
+      # on-device auto-updater to find, with no manual `git tag`/`git push
+      # --tags` step. Runs before the build below so the version baked into
+      # the compiled binary matches the tag it ships under (otherwise the
+      # device would keep seeing a "newer" release forever: the release tag
+      # advances but the binary it points to would still report the old
+      # version). This has to commit+tag+release in THIS run rather than push
+      # a tag and rely on that push re-triggering the workflow: pushes made
+      # with the default GITHUB_TOKEN intentionally do not start new workflow
+      # runs (GitHub's own loop guard), so that design would tag a version
+      # and then silently never build or release it.
+      - name: Bump version and tag
+        id: bump
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          CUR=$(grep -oP '(?<=#define FW_VERSION  ")[0-9]+\.[0-9]+\.[0-9]+' src/config.h)
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CUR"
+          NEXT="$MAJOR.$MINOR.$((PATCH + 1))"
+          sed -i -E "s/(#define FW_VERSION[[:space:]]+\")[0-9]+\.[0-9]+\.[0-9]+(\")/\1$NEXT\2/" src/config.h
+          git add src/config.h
+          git commit -m "chore: bump version to v$NEXT"
+          git tag "v$NEXT"
+          git push origin HEAD:main
+          git push origin "v$NEXT"
+          echo "tag=v$NEXT" >> "$GITHUB_OUTPUT"
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -60,10 +90,13 @@ jobs:
       # generate_release_notes fills the body with the commits and PRs since the
       # previous tag, so a release is never published blank. Editing the release
       # afterwards to write proper notes keeps whatever you put there: the action
-      # only sets the body when it creates the release.
+      # only sets the body when it creates the release. tag_name is left unset
+      # for a manually-pushed vX.Y.Z tag (the bump step above skips, so its
+      # output is empty) — the action then falls back to the tag from the ref.
       - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.bump.outputs.tag }}
           files: dist/*
           generate_release_notes: true
