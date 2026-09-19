@@ -39,7 +39,18 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           CUR=$(grep -oP '(?<=#define FW_VERSION  ")[0-9]+\.[0-9]+\.[0-9]+' src/config.h)
           IFS='.' read -r MAJOR MINOR PATCH <<< "$CUR"
-          NEXT="$MAJOR.$MINOR.$((PATCH + 1))"
+          PATCH=$((PATCH + 1))
+          # A merged branch can carry a config.h whose FW_VERSION lags behind
+          # main's (e.g. it branched before an earlier auto-bump landed and
+          # never touched that line, so the merge quietly keeps the branch's
+          # stale value). Bumping that blindly picks a tag that's already
+          # taken and this whole step fails at the tag push, part-way through
+          # (main already moved, but no release for it). Guard against it: keep
+          # advancing the patch until we land on a v-tag that doesn't exist yet.
+          while git ls-remote --exit-code --tags origin "refs/tags/v$MAJOR.$MINOR.$PATCH" >/dev/null 2>&1; do
+            PATCH=$((PATCH + 1))
+          done
+          NEXT="$MAJOR.$MINOR.$PATCH"
           sed -i -E "s/(#define FW_VERSION[[:space:]]+\")[0-9]+\.[0-9]+\.[0-9]+(\")/\1$NEXT\2/" src/config.h
           git add src/config.h
           git commit -m "chore: bump version to v$NEXT"
