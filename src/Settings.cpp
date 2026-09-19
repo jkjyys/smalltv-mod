@@ -446,16 +446,13 @@ void Settings::setDefaults() {
 
   mode = DEFAULT_MODE;
   carouselSec = DEFAULT_CAROUSEL_SEC;
-  carouselTicker = carouselUsage = carouselRadar = carouselWeather = true;
+  carouselTicker = carouselUsage = carouselRadar = carouselWeather = carouselClock = true;
   httpTimeout = DEFAULT_HTTP_TIMEOUT;
 
   brightness = DEFAULT_BRIGHTNESS;
   autoBrightness = false;
   backlightInverted = TFT_BL_DEFAULT_INVERTED;
   rotation = 0;
-
-  autoUpdateEnabled = DEFAULT_AUTOUPDATE_ENABLED;
-  autoUpdateHours   = DEFAULT_AUTOUPDATE_HOURS;
 
   ticker.setDefaults();
   usage.setDefaults();
@@ -539,13 +536,12 @@ void settingsToJson(const Settings& s, JsonObject root, bool includeSecrets) {
   root["carouselUsage"]     = s.carouselUsage;
   root["carouselRadar"]     = s.carouselRadar;
   root["carouselWeather"]   = s.carouselWeather;
+  root["carouselClock"]     = s.carouselClock;
   root["httpTimeout"]       = s.httpTimeout;
   root["brightness"]        = s.brightness;
   root["autoBrightness"]    = s.autoBrightness;
   root["backlightInverted"] = s.backlightInverted;
   root["rotation"]          = s.rotation;
-  root["autoUpdateEnabled"] = s.autoUpdateEnabled;
-  root["autoUpdateHours"]   = s.autoUpdateHours;
 
   // Feature slices
   s.ticker.toJson(root["ticker"].to<JsonObject>());
@@ -614,14 +610,13 @@ void settingsApplyJson(Settings& s, JsonObjectConst root) {
   if (root["carouselUsage"].is<bool>())   s.carouselUsage = root["carouselUsage"];
   if (root["carouselRadar"].is<bool>())   s.carouselRadar = root["carouselRadar"];
   if (root["carouselWeather"].is<bool>()) s.carouselWeather = root["carouselWeather"];
+  if (root["carouselClock"].is<bool>())   s.carouselClock = root["carouselClock"];
 
   if (root["httpTimeout"].is<int>())        s.httpTimeout = constrain((int)root["httpTimeout"], 1000, 20000);
   if (root["brightness"].is<int>())         s.brightness = constrain((int)root["brightness"], 0, 100);
   if (root["autoBrightness"].is<bool>())    s.autoBrightness = root["autoBrightness"];
   if (root["backlightInverted"].is<bool>()) s.backlightInverted = root["backlightInverted"];
   if (root["rotation"].is<int>())           s.rotation = (uint8_t)(((int)root["rotation"]) & 3);
-  if (root["autoUpdateEnabled"].is<bool>()) s.autoUpdateEnabled = root["autoUpdateEnabled"];
-  if (root["autoUpdateHours"].is<int>())    s.autoUpdateHours = (uint8_t)constrain((int)root["autoUpdateHours"], MIN_AUTOUPDATE_HOURS, MAX_AUTOUPDATE_HOURS);
 
   // Feature slices: prefer the nested object; fall back to the top level so a
   // legacy flat config.json (or a legacy POST) still applies. The old shared

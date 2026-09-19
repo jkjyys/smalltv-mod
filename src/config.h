@@ -12,14 +12,11 @@
 // Firmware identity
 // ---------------------------------------------------------------------------
 #define FW_NAME     "smalltv-mod"
-#define FW_VERSION  "2.9.3"
+#define FW_VERSION  "2.9.2"
 
-// Project / update references (shown in the web UI; used by the GitHub self-update).
-// Pointed at the jkjyys fork so both the manual "Update now" button and the
-// periodic auto-update below install this fork's own releases, not upstream's —
-// upstream's releases carry none of this fork's customizations.
-#define REPO_URL      "https://github.com/jkjyys/smalltv-mod"
-#define REPO_OWNER    "jkjyys"
+// Project / update references (shown in the web UI; used by the GitHub self-update)
+#define REPO_URL      "https://github.com/giovi321/smalltv-mod"
+#define REPO_OWNER    "giovi321"
 #define REPO_NAME     "smalltv-mod"
 // Release asset the GitHub self-updater pulls — one app image per target.
 #if defined(SMALLTV_ESP32C2)
@@ -33,14 +30,6 @@
 #endif
 #define GH_API_HOST   "api.github.com"
 #define DAEMON_URL    "https://github.com/giovi321/clawdmeter-daemon"
-
-// Periodic auto-update (System tab): on by default, checks the fork's own
-// releases every N hours and installs a newer one the same way the "Update
-// now" button does, so a push to GitHub reaches the device with no manual step.
-#define DEFAULT_AUTOUPDATE_ENABLED true
-#define DEFAULT_AUTOUPDATE_HOURS   24
-#define MIN_AUTOUPDATE_HOURS        1
-#define MAX_AUTOUPDATE_HOURS      168   // one week
 
 // ---------------------------------------------------------------------------
 // Display wiring + panel quirks — board-specific, pulled from the right header.
@@ -99,6 +88,7 @@
 //   1 = Claude usage meter (mascot + 5h/7d usage bars, fed by the daemon/)
 //   2 = plane radar
 //   3 = carousel: rotate through the ticked features on a timer
+//   6 = full-screen digital clock (date + weekday + big HH:MM)
 // ---------------------------------------------------------------------------
 #define MODE_STOCKS    0
 #define MODE_USAGE     1
@@ -106,6 +96,7 @@
 #define MODE_CAROUSEL  3
 #define MODE_NOTIFY    4             // transient overlay: armed over HTTP, never persisted
 #define MODE_WEATHER   5
+#define MODE_CLOCK     6
 #define DEFAULT_MODE MODE_STOCKS
 #define DEFAULT_CAROUSEL_SEC 30      // per-mode dwell in carousel
 
@@ -131,6 +122,9 @@
 #endif
 #ifndef WITH_WEATHER
 #define WITH_WEATHER 1
+#endif
+#ifndef WITH_CLOCK
+#define WITH_CLOCK 1
 #endif
 
 // Claude usage mode: once data stops arriving for this long (PC asleep, daemon

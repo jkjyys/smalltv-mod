@@ -127,6 +127,7 @@ small.hint{display:block;color:var(--mut);margin-top:4px;font-size:12px}
     <option value="usage">Clawdmeter</option>
     <option value="radar">Radar</option>
     <option value="weather">Weather</option>
+    <option value="clock">Clock</option>
     <option value="carousel">Carousel (rotate modes)</option>
    </select>
    <div id="carouselRow">
@@ -135,6 +136,7 @@ small.hint{display:block;color:var(--mut);margin-top:4px;font-size:12px}
     <div class="chk"><input id="carouselUsage" type="checkbox"><label>Clawdmeter</label></div>
     <div class="chk"><input id="carouselRadar" type="checkbox"><label>Radar</label></div>
     <div class="chk"><input id="carouselWeather" type="checkbox"><label>Weather</label></div>
+    <div class="chk"><input id="carouselClock" type="checkbox"><label>Clock</label></div>
    </div>
    <small class="hint">Each name here is the tab that configures it. Pick the active feature, then set it up in its own tab. Carousel rotates through the ticked features.</small>
   </div>
@@ -343,18 +345,13 @@ small.hint{display:block;color:var(--mut);margin-top:4px;font-size:12px}
    </div>
    <div id="ghMsg" class="muted" style="margin-top:8px"></div>
    <small class="hint">Pulls the newest release straight from <a id="repoLink" href="https://github.com/giovi321/smalltv-mod/releases" target="_blank">the GitHub repo</a>. HTTPS OTA is tight on the ESP8266; if it fails, use the manual upload below.</small>
-   <div class="chk" style="margin-top:14px"><input id="autoUpdateEnabled" type="checkbox"><label>Check automatically and install newer releases on its own</label></div>
-   <div class="row">
-    <div><label>Check every (hours)</label><input id="autoUpdateHours" type="number" min="1" max="168"></div>
-   </div>
-   <small class="hint">Runs the same check-and-install as "Update now", on its own schedule — push to GitHub, and the device catches up within this interval. The device reboots if it installs an update. Turn this off to only update by pressing the button above.</small>
   </div>
   <div class="card"><h2>Manual update (OTA)</h2>
    <input id="fw" type="file" accept=".bin">
    <div style="margin-top:12px"><button class="btn" onclick="upload()" id="upBtn">Upload &amp; flash</button></div>
    <div class="bar"><div id="upBar"></div></div>
    <div id="upMsg" class="muted" style="margin-top:8px"></div>
-   <small class="hint">Upload a firmware.bin from the <a id="manualRelLink" href="https://github.com/giovi321/smalltv-mod/releases" target="_blank">releases page</a> or a local build. The device reboots when done.</small>
+   <small class="hint">Upload a firmware.bin from the <a href="https://github.com/giovi321/smalltv-mod/releases" target="_blank">releases page</a> or a local build. The device reboots when done.</small>
   </div>
   <div class="card"><h2>Settings backup</h2>
    <button class="btn sec" onclick="location.href='/api/export'">Export settings</button>
@@ -436,8 +433,8 @@ var TZMAP={
 function fillTz(){var s=$('tz');if(!s)return;var keys=Object.keys(TZMAP).filter(function(k){return k!==''});
  keys.sort();s.innerHTML='<option value="">UTC</option>'+keys.map(function(k){return '<option value="'+k+'">'+k+'</option>'}).join('');}
 
-var MODEOPT={ticker:'stocks',usage:'usage',radar:'radar',weather:'weather'};
-var CAROPT={ticker:'carouselTicker',usage:'carouselUsage',radar:'carouselRadar',weather:'carouselWeather'};
+var MODEOPT={ticker:'stocks',usage:'usage',radar:'radar',weather:'weather',clock:'clock'};
+var CAROPT={ticker:'carouselTicker',usage:'carouselUsage',radar:'carouselRadar',weather:'carouselWeather',clock:'carouselClock'};
 function hideFeat(name){
  var b=document.querySelector('nav button[data-t="'+name+'"]'); if(b)b.remove();
  var sec=$(name); if(sec)sec.remove();
@@ -460,7 +457,7 @@ function setGain(id,lab,v){var n=(v!=null?v:100);sv(id,n);var e=$(lab);if(e)e.te
 function resetColors(){setGain('rGain','rgVal',100);setGain('gGain','ggVal',100);setGain('bGain','bgVal',100);
  toast('Gains reset — press Save settings to apply')}
 function loadConfig(){return j('/api/config').then(function(c){C=c;
- var f=c.features||{}; ['ticker','usage','radar','weather'].forEach(function(k){if(f[k]===false)hideFeat(k)});
+ var f=c.features||{}; ['ticker','usage','radar','weather','clock'].forEach(function(k){if(f[k]===false)hideFeat(k)});
  // WireGuard is only built for the chips with room for it; drop the card otherwise
  if(f.wireguard===false){var wc=$('wgCard'); if(wc)wc.remove()}
  var w=c.wg||{};
@@ -477,7 +474,6 @@ function loadConfig(){return j('/api/config').then(function(c){C=c;
  $('rotation').value=c.rotation;
  $('autoBrightness').checked=!!c.autoBrightness;
  $('backlightInverted').checked=!!c.backlightInverted;
- sc('autoUpdateEnabled',c.autoUpdateEnabled!==false); sv('autoUpdateHours',c.autoUpdateHours||24);
  // panel colour slice
  var dp=c.display||{};
  sv('colorOrder',dp.colorOrder||'auto'); sc('colorInvert',!!dp.invert);
@@ -494,7 +490,7 @@ function loadConfig(){return j('/api/config').then(function(c){C=c;
  $('mode').value=c.mode||'stocks'; modeChanged();
  sv('carouselSec',c.carouselSec||30);
  sc('carouselTicker',c.carouselTicker!==false); sc('carouselUsage',c.carouselUsage!==false); sc('carouselRadar',c.carouselRadar!==false);
- sc('carouselWeather',c.carouselWeather!==false);
+ sc('carouselWeather',c.carouselWeather!==false); sc('carouselClock',c.carouselClock!==false);
  // ticker slice
  T_TEXT.forEach(function(k){sv(k,t[k])});
  T_NUM.forEach(function(k){sv(k,t[k])});
@@ -584,13 +580,11 @@ function collect(){
  var o={mode:gv('mode'),
   carouselSec:parseInt(gv('carouselSec'))||30,
   carouselTicker:gc('carouselTicker'), carouselUsage:gc('carouselUsage'), carouselRadar:gc('carouselRadar'),
-  carouselWeather:gc('carouselWeather'),
+  carouselWeather:gc('carouselWeather'), carouselClock:gc('carouselClock'),
   brightness:parseInt(gv('brightness'))||0,
   rotation:parseInt(gv('rotation')),
   autoBrightness:gc('autoBrightness'),
   backlightInverted:gc('backlightInverted'),
-  autoUpdateEnabled:gc('autoUpdateEnabled'),
-  autoUpdateHours:parseInt(gv('autoUpdateHours'))||24,
   hostname:gv('hostname'), apSsid:gv('apSsid'),
   display:{colorOrder:gv('colorOrder')||'auto', invert:gc('colorInvert'),
    rGain:parseInt(gv('rGain'))||100, gGain:parseInt(gv('gGain'))||100, bGain:parseInt(gv('bGain'))||100},
@@ -732,8 +726,7 @@ function loadStatus(){j('/api/status').then(function(s){
  // System tab was closed. Don't clobber an in-progress check/update message.
  if(!window._otaShown){window._otaShown=1;var gm=$('ghMsg');if(gm&&!gm.textContent&&s.updateMsg&&s.updateMsg!=='updating...')gm.textContent='Last update: '+s.updateMsg}
  var fv=$('footVer'); if(fv)fv.textContent=' v'+s.version;
- if(s.repo){var rl=$('repoLink'); if(rl)rl.href=s.repo+'/releases'; var fr=$('footRepo'); if(fr)fr.href=s.repo;
-  var mr=$('manualRelLink'); if(mr)mr.href=s.repo+'/releases';}
+ if(s.repo){var rl=$('repoLink'); if(rl)rl.href=s.repo+'/releases'; var fr=$('footRepo'); if(fr)fr.href=s.repo;}
  $('statusBox').innerHTML=
   kv('Firmware',s.fw+' '+s.version)+kv('Mode',s.mode.toUpperCase())+
   kv('Network',s.ssid||'-')+kv('IP',s.ip||'-')+kv('mDNS','http://'+(C.hostname||'smalltv')+'.local')+
