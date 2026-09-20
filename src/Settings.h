@@ -214,6 +214,10 @@ struct Settings {
   bool     backlightInverted; // active-low backlight
   uint8_t  rotation;          // 0..3 screen orientation
 
+  // --- Firmware self-update (System tab) ---
+  bool     autoUpdateEnabled; // periodically check GitHub and install a newer release
+  uint8_t  autoUpdateHours;   // how often to check, in hours
+
   // --- Feature slices ---
   TickerSettings  ticker;
   UsageSettings   usage;
