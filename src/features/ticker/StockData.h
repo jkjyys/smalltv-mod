@@ -9,7 +9,7 @@ struct StockData {
   char    currency[6];
   char    rangeLabel[8];
   char    altSymbol[MAX_SYMBOL_LEN];  // Binance symbol for off-hours (copied from SymbolCfg; "" = disabled)
-  bool    pctUnit;                     // display as "X.XX%" instead of currency+price (copied from SymbolCfg)
+  bool    pctUnit;                     // display as "X.XXXX%" instead of currency+price (copied from SymbolCfg)
   uint32_t regularMarketTime;  // Yahoo's meta.regularMarketTime (Unix seconds) — used for the holiday check in stepSymbol
   uint8_t source;     // SRC_* this ticker fetches from (copied from settings)
   float   qty;        // position size (copied from settings; 0 = no position)

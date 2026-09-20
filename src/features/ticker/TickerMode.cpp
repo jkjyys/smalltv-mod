@@ -45,7 +45,12 @@ static void drawSparkline(Arduino_GFX* gfx, const StockData& d,
 }
 
 // ---- number formatting ----------------------------------------------------
-static void fmtPrice(float v, char* out, size_t n) {
+// pctUnit symbols (e.g. "^TNX", the 10Y Treasury yield) are a rate, not a
+// price: 2 decimals rounds e.g. 4.0862 -> 4.09, which hides the day-to-day
+// moves that actually matter at this scale. Always show 4 for those,
+// regardless of magnitude, instead of falling through the price tiers below.
+static void fmtPrice(float v, char* out, size_t n, bool pctUnit = false) {
+  if (pctUnit) { snprintf(out, n, "%.4f", v); return; }
   float a = fabsf(v);
   if (a >= 1000)      snprintf(out, n, "%.2f", v);
   else if (a >= 1)    snprintf(out, n, "%.2f", v);
@@ -119,7 +124,7 @@ static void drawStock(const StockData& d, uint8_t pageIndex, uint8_t pageCount,
   // Price (big, auto-fit)
   if (s.ticker.showPrice) {
     char num[20];
-    fmtPrice(d.price, num, sizeof(num));
+    fmtPrice(d.price, num, sizeof(num), d.pctUnit);
     char line[28];
     if (d.pctUnit) snprintf(line, sizeof(line), "%s%%", num);          // e.g. "^TNX" (10Y yield): a rate, not a price — Yahoo's own currency field says USD anyway
     else           snprintf(line, sizeof(line), "%s%s", d.currency, num);
