@@ -698,7 +698,7 @@ function addRow(o){var t=$('symTable');var tr=document.createElement('tr');tr.cl
   '<td style="width:118px"><select class="src" onchange="symHintFor(this.value)">'+
    '<option value="yahoo">Yahoo Finance</option><option value="cash">cash.ch</option><option value="github">GitHub</option><option value="finnhub">Finnhub</option><option value="binance">Binance (24/7, no key)</option><option value="webhook">Webhook</option></select></td>'+
   '<td style="width:100px"><input class="alt" type="text" placeholder="off-hrs (Binance)" value="'+esc(o.altSymbol||'')+'" title="Yahoo symbols only: a Binance symbol (e.g. INTCUSDT) to switch to outside US market hours"></td>'+
-  '<td style="width:30px"><input class="pct" type="checkbox" title="Show as X.XX% instead of a currency price — for rate/yield symbols like ^TNX"'+(o.pctUnit?' checked':'')+'></td>'+
+  '<td style="width:30px"><input class="pct" type="checkbox" title="Show as X.XXXX% instead of a currency price — for rate/yield symbols like ^TNX"'+(o.pctUnit?' checked':'')+'></td>'+
   '<td style="width:58px"><input class="q" type="number" step="any" min="0" placeholder="qty" value="'+(o.qty>0?o.qty:'')+'"></td>'+
   '<td style="width:70px"><input class="c" type="number" step="any" min="0" placeholder="cost" value="'+(o.cost>0?o.cost:'')+'"></td>'+
   '<td style="width:34px"><button class="btn sec" style="padding:6px 10px" onclick="this.closest(\'tr\').remove()">&times;</button></td>';
