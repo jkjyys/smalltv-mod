@@ -686,7 +686,8 @@ enum ParseKind : uint8_t { PARSE_WEBHOOK, PARSE_YAHOO, PARSE_CASH_QUOTE, PARSE_C
 // pays for it: this session resumes the rest for ~23 h.
 static TlsSession g_cashSession;
 
-static bool fetchUrl(const Settings& s, const String& url, ParseKind kind, StockData& d) {
+static bool fetchUrl(const Settings& s, const String& url, ParseKind kind, StockData& d,
+                      bool trySmallBuf = false) {
   bool https = url.startsWith("https://");
   bool cash = (kind == PARSE_CASH_QUOTE || kind == PARSE_CASH_CHART);
   bool finnhub = (kind == PARSE_FINNHUB);
@@ -703,22 +704,33 @@ static bool fetchUrl(const Settings& s, const String& url, ParseKind kind, Stock
     //    cipher list — like most current API hosts they don't offer the cheap
     //    static-RSA suites the block below relies on. No MFLN assumption or
     //    session resumption (unlike cash.ch) since we haven't confirmed either
-    //    honors it; sized generously instead (see the weather feature's
-    //    Open-Meteo bug for what happens when this buffer is too small).
+    //    honors it; sized generously by default (see the weather feature's
+    //    Open-Meteo bug for what happens when this buffer is too small) — but
+    //    the caller can ask for a much smaller trial buffer first (trySmallBuf)
+    //    when the heap is too fragmented to clear the generous size. Same
+    //    can't-make-it-worse reasoning as OtaUpdate.cpp's boot-time downloader:
+    //    the gate below scales with the buffer via that same proven formula
+    //    (rxBuf+1024 contiguous), so a too-small buffer just fails the
+    //    connection cleanly (dbgLastHttpCode goes negative) and the caller
+    //    retries with the known-good 5120B/13500B pair on the very next tick.
     //  - Yahoo / GitHub / webhook: forced to the cheap static-RSA suites, so
     //    those handshakes stay as light as the old BASIC build.
     if (cash) {
       if (platformMaxFreeBlock() < 16000) { d.dbgLastHttpCode = -1000; return false; }   // largest contiguous block, not total
       client.reset(platformMakeSecureClient(512, &g_cashSession, 512, /*cheapCiphers=*/false));
     } else if (finnhub || binance) {
-      // Lowered from the original 16000: months of /api/status samples never
-      // once showed a crash from attempting this handshake, just repeated
-      // skips whenever maxblk sat in the 14000s — a healthy value on this
-      // device, just short of the original (guessed, not measured) margin.
-      // Two hybrid tickers (Yahoo + off-hours Binance) needing this same gate
-      // at once made the old margin fail often enough to be a real nuisance.
-      if (platformMaxFreeBlock() < 13500) { d.dbgLastHttpCode = -1000; return false; }
-      client.reset(platformMakeSecureClient(5120, nullptr, 512, /*cheapCiphers=*/false));
+      // 13500 for the full 5120B buffer was lowered from the original 16000:
+      // months of /api/status samples never once showed a crash from
+      // attempting this handshake, just repeated skips whenever maxblk sat in
+      // the 14000s — a healthy value on this device, just short of the
+      // original (guessed, not measured) margin. trySmallBuf goes further:
+      // a 3072B trial buffer, gated the same way OtaUpdate.cpp's downloader
+      // gates its own small-buffer-first try (rxBuf+1024 contiguous) rather
+      // than this branch's own untested-at-small-sizes 13500 constant.
+      uint16_t rxBuf = trySmallBuf ? 3072 : 5120;
+      uint32_t needBlk = trySmallBuf ? (uint32_t)rxBuf + 1024 : 13500;
+      if (platformMaxFreeBlock() < needBlk) { d.dbgLastHttpCode = -1000; return false; }
+      client.reset(platformMakeSecureClient(rxBuf, nullptr, 512, /*cheapCiphers=*/false));
     } else {
       // raw.githubusercontent.com sends a ~4 KB cert record and won't negotiate
       // MFLN, so it needs a bigger receive buffer than Yahoo's small records.
@@ -795,15 +807,32 @@ static bool stepSymbol(const Settings& s, StockData& d) {
     // flips back.
     if (d.altSymbol[0] && !usMarketRegularHoursNow()) {
       if (g_fetchPhase == 0) {
-        bool ok = fetchUrl(s, buildBinanceUrl(d.altSymbol), PARSE_BINANCE, d);
-        if (!ok) { d.error = true; return true; }
+        // Try the small trial buffer first — this off-hours hand-off fires on
+        // every poll while the US market's closed, so a fragmented heap
+        // shouldn't mean this ticker just never gets a quote all weekend. A
+        // too-small buffer fails the connection (dbgLastHttpCode goes
+        // negative) rather than corrupting anything; phase 2 below retries
+        // with the original, proven buffer on the very next tick when that
+        // happens — a real HTTP response (bad symbol, etc.) is not retried.
+        bool ok = fetchUrl(s, buildBinanceUrl(d.altSymbol), PARSE_BINANCE, d, /*trySmallBuf=*/true);
+        if (ok) {
+          d.extHours = true;
+          strlcpy(d.extLabel, "24/7", sizeof(d.extLabel));
+          g_fetchPhase = 1;
+          return false;   // sparkline next tick — same one-request-per-tick rule as elsewhere
+        }
+        if (d.dbgLastHttpCode < 0) { g_fetchPhase = 2; return false; }
+        d.error = true; return true;
+      }
+      if (g_fetchPhase == 2) {   // retry with the original, larger trial buffer
+        if (!fetchUrl(s, buildBinanceUrl(d.altSymbol), PARSE_BINANCE, d)) { d.error = true; return true; }
         d.extHours = true;
         strlcpy(d.extLabel, "24/7", sizeof(d.extLabel));
         g_fetchPhase = 1;
-        return false;   // sparkline next tick — same one-request-per-tick rule as elsewhere
+        return false;
       }
       // phase 1: sparkline (from the Binance altSymbol), best-effort — a miss
-      // here isn't an error, `d` already has a valid price from phase 0.
+      // here isn't an error, `d` already has a valid price from an earlier phase.
       if (s.ticker.showChart && s.ticker.points >= 2)
         fetchUrl(s, buildBinanceKlinesUrl(s, d.altSymbol), PARSE_BINANCE_KLINES, d);
       return true;
@@ -869,12 +898,31 @@ static bool stepSymbol(const Settings& s, StockData& d) {
 
   if (d.source == SRC_FINNHUB) {
     if (s.ticker.finnhubKey.length() < 4) { d.error = true; return true; }   // no key set yet
+    if (g_fetchPhase == 0) {
+      // Small-buffer-first, same reasoning as the Yahoo off-hours hand-off
+      // above: a too-small buffer just fails the connection cleanly, so
+      // phase 1 retries with the original buffer on the next tick if needed.
+      bool ok = fetchUrl(s, buildFinnhubUrl(s, d.symbol), PARSE_FINNHUB, d, /*trySmallBuf=*/true);
+      if (ok) return true;
+      if (d.dbgLastHttpCode < 0) { g_fetchPhase = 1; return false; }
+      d.error = true; return true;
+    }
+    // phase 1: retry once with the original, larger trial buffer
     if (!fetchUrl(s, buildFinnhubUrl(s, d.symbol), PARSE_FINNHUB, d)) d.error = true;
     return true;
   }
 
   if (d.source == SRC_BINANCE) {
     if (g_fetchPhase == 0) {
+      // Small-buffer-first, same reasoning as the Yahoo off-hours hand-off
+      // above: a too-small buffer just fails the connection, so phase 2
+      // retries with the original buffer on the next tick if needed.
+      bool ok = fetchUrl(s, buildBinanceUrl(d.symbol), PARSE_BINANCE, d, /*trySmallBuf=*/true);
+      if (ok) { g_fetchPhase = 1; return false; }
+      if (d.dbgLastHttpCode < 0) { g_fetchPhase = 2; return false; }
+      d.error = true; return true;
+    }
+    if (g_fetchPhase == 2) {   // retry with the original, larger trial buffer
       if (!fetchUrl(s, buildBinanceUrl(d.symbol), PARSE_BINANCE, d)) { d.error = true; return true; }
       g_fetchPhase = 1;
       return false;
