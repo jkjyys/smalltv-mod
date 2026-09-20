@@ -194,47 +194,54 @@ void otaBootUpdate(const Settings& s) {
   if (!r.ok)    { otaBootResult("check failed: " + r.error); return; }
   if (!r.newer) { otaBootResult(F("already up to date (" FW_VERSION ")")); return; }
 
-  // Honest guard: rx + tx buffers plus BearSSL engine/stack-thunk overhead.
-  const uint32_t need    = 16384 + 512 + 8000;
-  const uint32_t needBlk = 16384 + 1024;
-  // Total free heap can clear `need` while the heap is fragmented enough that
-  // no single block is big enough for the 16 KB TLS buffer — WiFi association
-  // and the check above's own HTTPS request each leave short-lived allocations
-  // behind. A few delay()s (which service the WiFi/lwIP stack) give those a
-  // moment to be freed and the allocator a moment to coalesce; cheap, and it's
-  // one throwaway boot attempt either way if it doesn't help.
-  for (int tries = 0; tries < 5; tries++) {
-    if (ESP.getFreeHeap() >= need && ESP.getMaxFreeBlockSize() >= needBlk) break;
-    delay(200);
-  }
-  if (ESP.getFreeHeap() < need || ESP.getMaxFreeBlockSize() < needBlk) {
-    otaBootResult("not enough heap even at boot (" + String(ESP.getFreeHeap()) +
-                  " free, " + String(ESP.getMaxFreeBlockSize()) +
-                  " largest block, need " + String(need) + " free / " +
-                  String(needBlk) + " contiguous)");
-    return;
-  }
-
-  BearSSL::WiFiClientSecure client;
-  client.setInsecure();
-  client.setBufferSizes(16384, 512);        // no MFLN on the CDN -> full-size records
-
   ESPhttpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
   ESPhttpUpdate.rebootOnUpdate(true);
 
-  // Retry once on a transient stream stall — the buffers are still free at boot
-  // and the request was already consumed, so a retry can't boot-loop.
-  t_httpUpdate_return ret = HTTP_UPDATE_FAILED;
-  for (int attempt = 1; attempt <= 2; attempt++) {
-    ret = ESPhttpUpdate.update(client, r.url);
-    if (ret == HTTP_UPDATE_OK || ret == HTTP_UPDATE_NO_UPDATES) break;  // OK reboots; NO_UPDATES is final
-    if (attempt < 2) delay(1000);
+  // GitHub's release-asset CDN (githubusercontent.com, same family as
+  // raw.githubusercontent.com below) doesn't formally negotiate MFLN, but that
+  // doesn't mean it actually sends full 16 KB records: GH_QUOTES_RXBUF (see
+  // config.h) found raw.githubusercontent.com's real records — cert included —
+  // fit in 5 KB, and months of that path running in StockClient never once hit
+  // an overflow. Try that same small size here first; it needs far less
+  // contiguous heap, which is exactly what this device is chronically short
+  // on. Fall back to the full 16 KB buffer only if the small one doesn't work
+  // — same heap bar this path always used, so this can't make a working
+  // device worse, only let a tight one through that couldn't clear 16 KB.
+  const uint32_t rxSizes[] = { 5120, 16384 };
+  String lastErr;
+  for (size_t i = 0; i < sizeof(rxSizes) / sizeof(rxSizes[0]); i++) {
+    uint32_t rxBuf = rxSizes[i];
+    // rx + tx buffers plus BearSSL engine/stack-thunk overhead.
+    const uint32_t need    = rxBuf + 512 + 8000;
+    const uint32_t needBlk = rxBuf + 1024;
+    // Total free heap can clear `need` while the heap is fragmented enough
+    // that no single block is big enough — WiFi association and the check
+    // above's own HTTPS request each leave short-lived allocations behind. A
+    // few delay()s (which service the WiFi/lwIP stack) give those a moment to
+    // be freed and the allocator a moment to coalesce; cheap, and it's one
+    // throwaway boot attempt either way if it doesn't help.
+    for (int tries = 0; tries < 5; tries++) {
+      if (ESP.getFreeHeap() >= need && ESP.getMaxFreeBlockSize() >= needBlk) break;
+      delay(200);
+    }
+    if (ESP.getFreeHeap() < need || ESP.getMaxFreeBlockSize() < needBlk) {
+      lastErr = "not enough heap even at boot (" + String(ESP.getFreeHeap()) +
+                " free, " + String(ESP.getMaxFreeBlockSize()) +
+                " largest block, need " + String(need) + " free / " +
+                String(needBlk) + " contiguous, " + String(rxBuf) + "B try)";
+      continue;   // this size didn't even get to try — see if a bigger/smaller one is left
+    }
+
+    BearSSL::WiFiClientSecure client;
+    client.setInsecure();
+    client.setBufferSizes(rxBuf, 512);
+
+    t_httpUpdate_return ret = ESPhttpUpdate.update(client, r.url);
+    if (ret == HTTP_UPDATE_OK) return;                     // rebootOnUpdate restarts into the new image
+    if (ret == HTTP_UPDATE_NO_UPDATES) { otaBootResult(F("server reported no update")); return; }
+    lastErr = ESPhttpUpdate.getLastErrorString() + " (" + String(rxBuf) + "B buffer)";
   }
-  if (ret == HTTP_UPDATE_NO_UPDATES)
-    otaBootResult(F("server reported no update"));
-  else if (ret != HTTP_UPDATE_OK)
-    otaBootResult("download failed: " + ESPhttpUpdate.getLastErrorString());
-  // HTTP_UPDATE_OK: rebootOnUpdate restarts into the new image
+  otaBootResult("download failed: " + lastErr);
 }
 #else
 bool   otaBootRequested() { return false; }
