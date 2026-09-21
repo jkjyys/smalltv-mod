@@ -153,14 +153,68 @@ String otaUpdateFromGitHub(const Settings& s) {
 }
 
 // ---- update-at-boot (ESP8266) ----------------------------------------------
-// The asset download needs a full 16 KB BearSSL receive buffer (github.com and
-// release-assets.githubusercontent.com offer no MFLN), which does not fit next
-// to the running features. The web UI queues the request in LittleFS and
-// reboots; this runs early in setup() with the heap still free. The request is
-// consumed BEFORE the attempt, so a crash or failure can never boot-loop.
+// The asset download used to just assume it needed a full 16 KB BearSSL
+// receive buffer (github.com and the release-asset CDN "probably" don't
+// negotiate MFLN) -- inherited, never actually measured on this device. A
+// small-buffer-first attempt sized off an unrelated host (raw.githubusercontent
+// .com's quotes traffic, see GH_QUOTES_RXBUF) didn't hold up for the release
+// CDN in practice. Below, the real download host is resolved and MFLN-probed
+// live instead (see resolveDownloadTarget/probeMfln), so the small buffer this
+// tries first is a server-acknowledged number, not another guess -- with the
+// original, proven 16 KB path kept as an unconditional fallback so this still
+// can't make a working device worse. The web UI queues the request in
+// LittleFS and reboots; this runs early in setup() with the heap still free.
+// The request is consumed BEFORE the attempt, so a crash or failure can never
+// boot-loop.
 #if defined(SMALLTV_ESP8266)
 static const char* OTA_REQ_PATH = "/ota.req";
 static const char* OTA_MSG_PATH = "/ota.msg";
+
+// Authority (host[:port]) of a "scheme://host[:port]/path" URL -- good enough
+// for the https:// URLs this file deals with.
+static void hostFromUrl(const String& url, char* out, size_t n) {
+  int start = url.indexOf("://");
+  start = (start < 0) ? 0 : start + 3;
+  int end = url.indexOf('/', start);
+  if (end < 0) end = url.length();
+  strlcpy(out, url.substring(start, end).c_str(), n);
+}
+
+// GitHub's release-asset URL (browser_download_url, itself on github.com)
+// redirects once to a signed, time-limited CDN URL -- historically something
+// under githubusercontent.com, but that's changed before and isn't worth
+// hardcoding, let alone assuming it behaves like raw.githubusercontent.com
+// (a different host doing different traffic). That CDN is where the actual
+// multi-hundred-KB firmware transfer happens, so it's the host whose TLS
+// record size actually matters for buffer sizing. Resolve it with a request
+// small enough to always afford -- github.com's own redirect response has
+// next to no body -- then hand the caller the real host to MFLN-probe.
+// Returns false only when even this small preliminary request couldn't
+// connect at all; the caller's own 16 KB/original-URL fallback covers that.
+static bool resolveDownloadTarget(const Settings& s, const String& url,
+                                   String& outUrl, char* outHost, size_t hostLen) {
+  outUrl = url;
+  char host[80];
+  hostFromUrl(url, host, sizeof(host));
+
+  BearSSL::WiFiClientSecure client;
+  client.setInsecure();
+  client.setBufferSizes(probeMfln(host), 512);
+
+  HTTPClient http;
+  http.setTimeout(s.httpTimeout);
+  http.setUserAgent(F(FW_NAME));
+  http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);   // resolved by hand, once, below
+  if (!http.begin(client, url)) return false;
+  int code = http.GET();
+  bool ok = (code > 0);                                       // a real response, whatever its status
+  if (code >= 300 && code < 400 && http.getLocation().length() > 0)
+    outUrl = http.getLocation();
+  http.end();
+
+  if (ok) hostFromUrl(outUrl, outHost, hostLen);
+  return ok;
+}
 
 bool otaBootRequested() { return LittleFS.exists(OTA_REQ_PATH); }
 
@@ -194,23 +248,40 @@ void otaBootUpdate(const Settings& s) {
   if (!r.ok)    { otaBootResult("check failed: " + r.error); return; }
   if (!r.newer) { otaBootResult(F("already up to date (" FW_VERSION ")")); return; }
 
-  ESPhttpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
   ESPhttpUpdate.rebootOnUpdate(true);
 
-  // GitHub's release-asset CDN (githubusercontent.com, same family as
-  // raw.githubusercontent.com below) doesn't formally negotiate MFLN, but that
-  // doesn't mean it actually sends full 16 KB records: GH_QUOTES_RXBUF (see
-  // config.h) found raw.githubusercontent.com's real records — cert included —
-  // fit in 5 KB, and months of that path running in StockClient never once hit
-  // an overflow. Try that same small size here first; it needs far less
-  // contiguous heap, which is exactly what this device is chronically short
-  // on. Fall back to the full 16 KB buffer only if the small one doesn't work
-  // — same heap bar this path always used, so this can't make a working
-  // device worse, only let a tight one through that couldn't clear 16 KB.
-  const uint32_t rxSizes[] = { 5120, 16384 };
+  // Resolve the release asset's real download host (the browser_download_url
+  // itself just 302s to a signed CDN URL — see resolveDownloadTarget above)
+  // and MFLN-probe THAT host live, so the small buffer tried first is a
+  // number the server actually acknowledged rather than a guess borrowed from
+  // an unrelated host (that's what v2.9.9's 5120-byte guess was, and it
+  // didn't hold up against the real CDN). If resolution itself fails for any
+  // reason, skip straight to the unconditional fallback below. Either way,
+  // the original, proven 16 KB / unresolved-URL / force-redirect path always
+  // runs last, so this change can only let a tight-heap device through that
+  // the old code would have failed anyway — never make a working device
+  // worse.
+  struct OtaAttempt { uint32_t rxBuf; String url; bool forceRedirect; };
+  OtaAttempt attempts[2];
+  uint8_t n = 0;
+
+  String resolvedUrl;
+  char resolvedHost[80] = {0};
+  if (resolveDownloadTarget(s, r.url, resolvedUrl, resolvedHost, sizeof(resolvedHost)) &&
+      resolvedHost[0]) {
+    attempts[n].rxBuf        = probeMfln(resolvedHost);
+    attempts[n].url          = resolvedUrl;
+    attempts[n].forceRedirect = false;   // already resolved by hand above
+    n++;
+  }
+  attempts[n].rxBuf         = 16384;
+  attempts[n].url           = r.url;
+  attempts[n].forceRedirect = true;      // let the client itself chase the redirect
+  n++;
+
   String lastErr;
-  for (size_t i = 0; i < sizeof(rxSizes) / sizeof(rxSizes[0]); i++) {
-    uint32_t rxBuf = rxSizes[i];
+  for (uint8_t i = 0; i < n; i++) {
+    uint32_t rxBuf = attempts[i].rxBuf;
     // rx + tx buffers plus BearSSL engine/stack-thunk overhead.
     const uint32_t need    = rxBuf + 512 + 8000;
     const uint32_t needBlk = rxBuf + 1024;
@@ -229,14 +300,17 @@ void otaBootUpdate(const Settings& s) {
                 " free, " + String(ESP.getMaxFreeBlockSize()) +
                 " largest block, need " + String(need) + " free / " +
                 String(needBlk) + " contiguous, " + String(rxBuf) + "B try)";
-      continue;   // this size didn't even get to try — see if a bigger/smaller one is left
+      continue;   // this size didn't even get to try — see if another attempt is left
     }
 
     BearSSL::WiFiClientSecure client;
     client.setInsecure();
     client.setBufferSizes(rxBuf, 512);
+    ESPhttpUpdate.setFollowRedirects(attempts[i].forceRedirect
+                                          ? HTTPC_FORCE_FOLLOW_REDIRECTS
+                                          : HTTPC_DISABLE_FOLLOW_REDIRECTS);
 
-    t_httpUpdate_return ret = ESPhttpUpdate.update(client, r.url);
+    t_httpUpdate_return ret = ESPhttpUpdate.update(client, attempts[i].url);
     if (ret == HTTP_UPDATE_OK) return;                     // rebootOnUpdate restarts into the new image
     if (ret == HTTP_UPDATE_NO_UPDATES) { otaBootResult(F("server reported no update")); return; }
     lastErr = ESPhttpUpdate.getLastErrorString() + " (" + String(rxBuf) + "B buffer)";
