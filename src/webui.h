@@ -573,7 +573,7 @@ function cashFind(){var q=gv('cashQ').trim();if(!q){toast('Paste a link, ISIN, o
  }).catch(function(){$('cashRes').innerHTML='<div class="muted">cash.ch not reachable from this browser</div>'});}
 function cashPick(k){var rows=document.querySelectorAll('#symTable tr');var tr=null;
  for(var i=0;i<rows.length;i++){if(!rows[i].querySelector('.s').value.trim()){tr=rows[i];break}}
- if(!tr){if(rows.length>=8){toast('Max 8');return}addRow({});tr=$('symTable').lastChild}
+ if(!tr){if(rows.length>=12){toast('Max 12');return}addRow({});tr=$('symTable').lastChild}
  tr.querySelector('.s').value=k;tr.querySelector('.src').value='cash';symHintFor('cash');
  toast('Added '+k+'. Set a name, then Save.');}
 function radarSrcChanged(){if(!$('radarSource'))return;var d=$('radarSource').value!=='webhook';
@@ -704,7 +704,7 @@ function addRow(o){var t=$('symTable');var tr=document.createElement('tr');tr.cl
   '<td style="width:34px"><button class="btn sec" style="padding:6px 10px" onclick="this.closest(\'tr\').remove()">&times;</button></td>';
  tr.querySelector('.src').value=o.source||'yahoo';
  t.appendChild(tr);}
-function addSym(){if(document.querySelectorAll('#symTable tr').length>=8){toast('Max 8');return}addRow({})}
+function addSym(){if(document.querySelectorAll('#symTable tr').length>=12){toast('Max 12');return}addRow({})}
 
 // airports
 function renderAps(arr){var t=$('apTable');if(!t)return;t.innerHTML='';arr.forEach(addApRow);if(!arr.length)addApRow({})}

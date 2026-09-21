@@ -63,7 +63,11 @@
 // ---------------------------------------------------------------------------
 // Limits (bound RAM usage on the ESP8266)
 // ---------------------------------------------------------------------------
-#define MAX_SYMBOLS       8    // max tickers in the rotation
+#define MAX_SYMBOLS      12    // max tickers in the rotation — was 8; bumped modestly
+                                // (not to e.g. 50) because this array's RAM is reserved
+                                // whether or not the slots are actually used, and this
+                                // device's free heap is already tight (see the OTA/ticker
+                                // heap-fragmentation fixes elsewhere in this file's history)
 #define MAX_SYMBOL_LEN   24    // e.g. "BTC-USD", cash.ch key "123456789-246-333"
 #define MAX_WIFI_NETS     4    // saved WiFi networks; strongest visible wins at boot
 #define MAX_NAME_LEN     20    // friendly name shown on screen
