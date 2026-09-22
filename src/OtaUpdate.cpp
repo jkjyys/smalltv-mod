@@ -191,29 +191,46 @@ static void hostFromUrl(const String& url, char* out, size_t n) {
 // next to no body -- then hand the caller the real host to MFLN-probe.
 // Returns false only when even this small preliminary request couldn't
 // connect at all; the caller's own 16 KB/original-URL fallback covers that.
+//
+// Chases up to 3 hops rather than assuming exactly one: github.com's own
+// redirect chain for a release asset has been just the one hop in practice,
+// but that's an observation, not a contract GitHub has made, and this file's
+// own history is "it changed CDN once already" (see the comment above). One
+// hop was silently assumed here before — if a future chain adds a second
+// redirect, the resolved attempt would probe/connect to an intermediate
+// host instead of the real download host, ESPhttpUpdate.update() would then
+// see a 3xx it's told not to follow (forceRedirect=false), fail, and that
+// failure used to get thrown away entirely whenever the 16 KB fallback also
+// failed its own heap check — see the per-attempt `errs` accumulation in
+// otaBootUpdate() below, added for exactly this kind of silently-swallowed
+// failure.
 static bool resolveDownloadTarget(const Settings& s, const String& url,
                                    String& outUrl, char* outHost, size_t hostLen) {
   outUrl = url;
-  char host[80];
-  hostFromUrl(url, host, sizeof(host));
+  for (uint8_t hop = 0; hop < 3; hop++) {
+    char host[80];
+    hostFromUrl(outUrl, host, sizeof(host));
 
-  BearSSL::WiFiClientSecure client;
-  client.setInsecure();
-  client.setBufferSizes(probeMfln(host), 512);
+    BearSSL::WiFiClientSecure client;
+    client.setInsecure();
+    client.setBufferSizes(probeMfln(host), 512);
 
-  HTTPClient http;
-  http.setTimeout(s.httpTimeout);
-  http.setUserAgent(F(FW_NAME));
-  http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);   // resolved by hand, once, below
-  if (!http.begin(client, url)) return false;
-  int code = http.GET();
-  bool ok = (code > 0);                                       // a real response, whatever its status
-  if (code >= 300 && code < 400 && http.getLocation().length() > 0)
-    outUrl = http.getLocation();
-  http.end();
+    HTTPClient http;
+    http.setTimeout(s.httpTimeout);
+    http.setUserAgent(F(FW_NAME));
+    http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);   // chased by hand, one hop per loop
+    if (!http.begin(client, outUrl)) return false;
+    int code = http.GET();
+    bool ok = (code > 0);                                       // a real response, whatever its status
+    bool redirected = (code >= 300 && code < 400 && http.getLocation().length() > 0);
+    if (redirected) outUrl = http.getLocation();
+    http.end();
 
-  if (ok) hostFromUrl(outUrl, outHost, hostLen);
-  return ok;
+    if (!ok) return false;
+    if (!redirected) { hostFromUrl(outUrl, outHost, hostLen); return true; }
+    // else: loop once more against the new outUrl
+  }
+  return false;   // too many hops — give up; caller's 16 KB fallback still runs
 }
 
 bool otaBootRequested() { return LittleFS.exists(OTA_REQ_PATH); }
@@ -308,13 +325,18 @@ void otaBootUpdate(const Settings& s) {
     const uint32_t needBlk = rxBuf + 1024;
     // Total free heap can clear `need` while the heap is fragmented enough
     // that no single block is big enough — WiFi association and the check
-    // above's own HTTPS request each leave short-lived allocations behind. A
-    // few delay()s (which service the WiFi/lwIP stack) give those a moment to
-    // be freed and the allocator a moment to coalesce; cheap, and it's one
-    // throwaway boot attempt either way if it doesn't help.
-    for (int tries = 0; tries < 5; tries++) {
+    // above's own HTTPS request(s) each leave short-lived allocations behind.
+    // A few delay()s (which service the WiFi/lwIP stack) give those a moment
+    // to be freed and the allocator a moment to coalesce; cheap, and it's one
+    // throwaway boot attempt either way if it doesn't help. Was 5*200ms —
+    // widened to 12*250ms (3s worst case) since the observed failures were
+    // sitting close to the line (largest block a few KB short of `needBlk`),
+    // the kind of gap a little more coalescing time plausibly closes, and
+    // 3s once at boot, only when already about to fail outright, costs
+    // nothing on the normal/no-update-pending path.
+    for (int tries = 0; tries < 12; tries++) {
       if (ESP.getFreeHeap() >= need && ESP.getMaxFreeBlockSize() >= needBlk) break;
-      delay(200);
+      delay(250);
     }
     if (ESP.getFreeHeap() < need || ESP.getMaxFreeBlockSize() < needBlk) {
       record(attempts[i].tag, rxBuf,
