@@ -135,6 +135,34 @@ jobs:
           name: smalltv-mod-firmware
           path: dist/
 
+      # Unstripped .elf per target, kept OUT of dist/ (and so out of the public
+      # release) — it's only for turning a future crash's "epc 0x... addr 0x..."
+      # (see main.cpp's g_safeMode / gfxCrash path, surfaced on /api/status) back
+      # into a source file+line with addr2line, e.g.:
+      #   xtensa-lx106-elf-addr2line -e smalltv-mod-firmware.elf -f -C -a 0x4000df64
+      # (the xtensa-lx106-elf toolchain ships inside ~/.platformio/packages/
+      # toolchain-xtensa-lx106-elf/bin/ on any machine that's run `pio run` for
+      # this project, or can be installed with `pip install platformio` +
+      # `pio pkg install -g -t toolchain-xtensa-lx106-elf`). Named after this
+      # run's version tag so the right .elf is easy to find for a crash reported
+      # against a specific smalltv-mod version; falls back to the commit SHA on
+      # a PR/dispatch run where the version-bump step above didn't run.
+      - name: Stage debug symbols
+        run: |
+          mkdir -p dist-debug
+          cp .pio/build/smalltv/firmware.elf dist-debug/smalltv-mod-firmware.elf
+          [ -f .pio/build/smalltv_c2/firmware.elf ] && cp .pio/build/smalltv_c2/firmware.elf dist-debug/smalltv-mod-firmware-c2.elf
+          [ -f .pio/build/smalltv_esp32/firmware.elf ] && cp .pio/build/smalltv_esp32/firmware.elf dist-debug/smalltv-mod-firmware-esp32.elf
+          [ -f .pio/build/smalltv_esp32_8mb/firmware.elf ] && cp .pio/build/smalltv_esp32_8mb/firmware.elf dist-debug/smalltv-mod-firmware-esp32-pro.elf
+          ls -la dist-debug/
+
+      - name: Upload debug symbols
+        uses: actions/upload-artifact@v4
+        with:
+          name: smalltv-mod-debug-symbols-${{ steps.bump.outputs.tag || github.sha }}
+          path: dist-debug/
+          retention-days: 90
+
       # generate_release_notes fills the body with the commits and PRs since the
       # previous tag, so a release is never published blank. Editing the release
       # afterwards to write proper notes keeps whatever you put there: the action
