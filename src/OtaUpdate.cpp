@@ -261,25 +261,46 @@ void otaBootUpdate(const Settings& s) {
   // runs last, so this change can only let a tight-heap device through that
   // the old code would have failed anyway — never make a working device
   // worse.
-  struct OtaAttempt { uint32_t rxBuf; String url; bool forceRedirect; };
+  struct OtaAttempt { uint32_t rxBuf; String url; bool forceRedirect; const char* tag; };
   OtaAttempt attempts[2];
   uint8_t n = 0;
 
+  // Kept even on success so a failure below can say plainly "resolve itself
+  // never worked" instead of silently only ever showing the fallback's error
+  // (see the accumulated `errs` below — that ambiguity is exactly what made
+  // v2.9.15's real "still fails sometimes" boil down to a bare heap number
+  // with no way to tell which of the two attempts, or which failure mode,
+  // actually produced it).
+  bool resolveOk = false;
   String resolvedUrl;
   char resolvedHost[80] = {0};
   if (resolveDownloadTarget(s, r.url, resolvedUrl, resolvedHost, sizeof(resolvedHost)) &&
       resolvedHost[0]) {
+    resolveOk = true;
     attempts[n].rxBuf        = probeMfln(resolvedHost);
     attempts[n].url          = resolvedUrl;
     attempts[n].forceRedirect = false;   // already resolved by hand above
+    attempts[n].tag           = "resolved";
     n++;
   }
   attempts[n].rxBuf         = 16384;
   attempts[n].url           = r.url;
   attempts[n].forceRedirect = true;      // let the client itself chase the redirect
+  attempts[n].tag           = "fallback";
   n++;
 
-  String lastErr;
+  // Every attempt's outcome, not just the last one — otherwise a fallback
+  // heap-check failure (which needs the biggest contiguous block of the two,
+  // so it's the one most likely to fail) silently overwrites whatever the
+  // small resolved-buffer attempt actually hit, and a boot-only report with
+  // no serial console has no other way to see that.
+  String errs;
+  auto record = [&errs](const char* tag, uint32_t rxBuf, const String& err) {
+    if (errs.length()) errs += "; ";
+    errs += String(tag) + " (" + String(rxBuf) + "B): " + err;
+  };
+  if (!resolveOk) record("resolve", 0, F("could not resolve/probe the real download host, skipped"));
+
   for (uint8_t i = 0; i < n; i++) {
     uint32_t rxBuf = attempts[i].rxBuf;
     // rx + tx buffers plus BearSSL engine/stack-thunk overhead.
@@ -296,10 +317,10 @@ void otaBootUpdate(const Settings& s) {
       delay(200);
     }
     if (ESP.getFreeHeap() < need || ESP.getMaxFreeBlockSize() < needBlk) {
-      lastErr = "not enough heap even at boot (" + String(ESP.getFreeHeap()) +
-                " free, " + String(ESP.getMaxFreeBlockSize()) +
-                " largest block, need " + String(need) + " free / " +
-                String(needBlk) + " contiguous, " + String(rxBuf) + "B try)";
+      record(attempts[i].tag, rxBuf,
+             "not enough heap (" + String(ESP.getFreeHeap()) + " free, " +
+             String(ESP.getMaxFreeBlockSize()) + " largest block, need " +
+             String(need) + " free / " + String(needBlk) + " contiguous)");
       continue;   // this size didn't even get to try — see if another attempt is left
     }
 
@@ -313,9 +334,9 @@ void otaBootUpdate(const Settings& s) {
     t_httpUpdate_return ret = ESPhttpUpdate.update(client, attempts[i].url);
     if (ret == HTTP_UPDATE_OK) return;                     // rebootOnUpdate restarts into the new image
     if (ret == HTTP_UPDATE_NO_UPDATES) { otaBootResult(F("server reported no update")); return; }
-    lastErr = ESPhttpUpdate.getLastErrorString() + " (" + String(rxBuf) + "B buffer)";
+    record(attempts[i].tag, rxBuf, ESPhttpUpdate.getLastErrorString());
   }
-  otaBootResult("download failed: " + lastErr);
+  otaBootResult("download failed: " + errs);
 }
 #else
 bool   otaBootRequested() { return false; }
