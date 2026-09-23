@@ -380,21 +380,41 @@ void otaBootUpdate(const Settings& s) {
       continue;   // this size didn't even get to try — see if another attempt is left
     }
 
-    BearSSL::WiFiClientSecure client;
-    client.setInsecure();
-    client.setBufferSizes(rxBuf, 512);
-    ESPhttpUpdate.setFollowRedirects(attempts[i].forceRedirect
-                                          ? HTTPC_FORCE_FOLLOW_REDIRECTS
-                                          : HTTPC_DISABLE_FOLLOW_REDIRECTS);
+    // A live device tried this exact resolved/small-buffer combination three
+    // times in a row and failed three different ways ("Stream Read Timeout",
+    // "connection lost" x2) — never a buffer-size complaint, and confirmed
+    // MFLN didn't change the outcome (see probeMfln above). A ~700 KB
+    // transfer at a 4 KB (or smaller) buffer needs on the order of a hundred-
+    // plus TLS reads to complete; on this device's borderline WiFi signal
+    // (-49 to -54 dBm in the field), that's a hundred-plus chances for one
+    // read to stall, versus roughly a dozen at the fallback's 16 KB. So this
+    // looks like ordinary transfer-time flakiness, not a deterministic bug —
+    // worth one immediate retry (fresh connection, same size) before giving
+    // up on this attempt and eating into the next one's heap.
+    String lastErr;
+    for (uint8_t retry = 0; retry < 2; retry++) {
+      if (retry) delay(300);
+      BearSSL::WiFiClientSecure client;
+      client.setInsecure();
+      client.setBufferSizes(rxBuf, 512);
+      ESPhttpUpdate.setFollowRedirects(attempts[i].forceRedirect
+                                            ? HTTPC_FORCE_FOLLOW_REDIRECTS
+                                            : HTTPC_DISABLE_FOLLOW_REDIRECTS);
 
-    t_httpUpdate_return ret = ESPhttpUpdate.update(client, attempts[i].url);
-    if (ret == HTTP_UPDATE_OK) return;                     // rebootOnUpdate restarts into the new image
-    if (ret == HTTP_UPDATE_NO_UPDATES) { otaBootResult(F("server reported no update")); return; }
+      t_httpUpdate_return ret = ESPhttpUpdate.update(client, attempts[i].url);
+      if (ret == HTTP_UPDATE_OK) return;                   // rebootOnUpdate restarts into the new image
+      if (ret == HTTP_UPDATE_NO_UPDATES) { otaBootResult(F("server reported no update")); return; }
+      lastErr = ESPhttpUpdate.getLastErrorString();
+      if (lastErr != "connection lost" &&
+          !lastErr.startsWith("Update error: ERROR[6]")) {
+        break;   // not the transient pattern above — a retry won't help, don't wait 300ms for nothing
+      }
+    }
     // getLastErrorString() only runs after a real attempt was made (the heap
     // check above passed), so heap is no longer the knife-edge it is in the
     // branch above — a single bounded String copy here is the same risk the
     // rest of this file already accepts (e.g. every other otaBootResult call).
-    record(attempts[i].tag, rxBuf, ESPhttpUpdate.getLastErrorString().c_str());
+    record(attempts[i].tag, rxBuf, lastErr.c_str());
   }
   otaBootResult(String("download failed: ") + errs);
 }
