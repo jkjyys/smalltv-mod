@@ -9,11 +9,26 @@
 #endif
 
 #if defined(SMALLTV_ESP8266)
-// Prefer MFLN so BearSSL can run with a tiny buffer; fall back to 4 KB.
+// Prefer MFLN so BearSSL can run with the smallest buffer the server actually
+// agreed to. 512/1024/4096 are the only fragment lengths the MFLN extension
+// (RFC 6066) defines, so all three get a real probe -- unlike the old version
+// of this function, which tried 512 and 1024 and then just ASSUMED 4096 would
+// work if neither did, without ever confirming the server would honor it. For
+// the small JSON GETs this is used for (otaCheckLatest, resolveDownloadTarget)
+// that assumption was harmless: the response is tiny either way. For the
+// resolved-host attempt in otaBootUpdate below -- an actual multi-hundred-KB
+// firmware transfer over many TLS records -- it wasn't: a real record bigger
+// than an unverified local RX buffer is exactly what produces a mid-transfer
+// "Stream Read Timeout" or "connection lost" instead of a clean handshake
+// failure, and that's what was observed happening on that path. If none of
+// the three sizes probe clean, fall back to the same unrestricted 16 KB
+// buffer the caller's own last-resort attempt already uses, rather than
+// gambling on a number the server never confirmed.
 static uint16_t probeMfln(const char* host) {
   if (BearSSL::WiFiClientSecure::probeMaxFragmentLength(host, 443, 512))  return 512;
   if (BearSSL::WiFiClientSecure::probeMaxFragmentLength(host, 443, 1024)) return 1024;
-  return 4096;
+  if (BearSSL::WiFiClientSecure::probeMaxFragmentLength(host, 443, 4096)) return 4096;
+  return 16384;
 }
 #endif
 
