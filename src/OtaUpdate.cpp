@@ -232,7 +232,9 @@ String otaUpdateFromGitHub(const Settings& s) {
 // otherwise the OLD, already-installed fetch code -- with its own already-
 // fragmented heap -- would be the one "testing" it. Expect the same for
 // this MFLN-probe fix: it must be flashed manually before a subsequent
-// release can meaningfully test it.
+// release can meaningfully test it. (Confirmed: v2.9.26 -- this fix -- was
+// flashed manually and boots fine; this docs-only commit exists purely to
+// give it a v2.9.27 to genuinely try auto-updating to.)
 #if defined(SMALLTV_ESP8266)
 static const char* OTA_REQ_PATH = "/ota.req";
 static const char* OTA_MSG_PATH = "/ota.msg";
