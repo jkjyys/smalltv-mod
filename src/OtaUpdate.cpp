@@ -246,8 +246,10 @@ String otaUpdateFromGitHub(const Settings& s) {
 // confirmed booting fine; testing it against v2.9.27 (a docs-only bump)
 // gave the conclusive live result this comment opens with: the CDN honors
 // no MFLN size at all, and the 16 KB path's heap precheck still never
-// passes. v2.9.28 (otaDownloadRanged(), below) will need the same manual
-// flash + one more release before it can be genuinely tested in turn.
+// passes. v2.9.28 (otaDownloadRanged(), above) hit the same trap in turn:
+// flashed manually, booted fine (22048 B free heap, no crash) -- the real
+// test is whether THIS build can auto-update itself to v2.9.29 (a
+// docs-only bump, this commit) using the new Range-chunked path.
 #if defined(SMALLTV_ESP8266)
 static const char* OTA_REQ_PATH = "/ota.req";
 static const char* OTA_MSG_PATH = "/ota.msg";
