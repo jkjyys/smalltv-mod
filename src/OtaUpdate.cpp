@@ -166,9 +166,9 @@ String otaUpdateFromGitHub(const Settings& s) {
 // Both attempts below go through github.com's own redirect
 // (HTTPC_FORCE_FOLLOW_REDIRECTS -- HTTPClient follows the 3xx to the real,
 // signed CDN URL itself) and differ only in RX buffer size. That's new as of
-// this version: an earlier design hand-resolved the redirect first (its own
-// GET to github.com, chased by hand) and then MFLN-probed the resolved CDN
-// host directly, so the small-buffer attempt connected straight to that
+// v2.9.22: an earlier design hand-resolved the redirect first (its own GET
+// to github.com, chased by hand) and then MFLN-probed the resolved CDN host
+// directly, so the small-buffer attempt connected straight to that
 // pre-resolved URL. On a live device that hand-resolved attempt failed the
 // same way -- "Stream Read Timeout" or "connection lost", never a heap or
 // buffer-size complaint -- six times running, surviving three different
@@ -176,14 +176,45 @@ String otaUpdateFromGitHub(const Settings& s) {
 // re-resolving a fresh URL immediately before each retry). Six identical
 // failures across four different theories point at the one thing all of
 // them shared and none of them tested: connecting directly to a pre-resolved
-// CDN URL, bypassing github.com's own redirect entirely. This version stops
-// doing that and lets ESPhttpUpdate/HTTPClient chase the redirect itself for
-// BOTH attempts, the same as the always-worked 16 KB path always has --
-// just with a smaller buffer tried first to fit this device's fragmented
-// heap, instead of assuming the small buffer also means a hand-resolved
-// direct connection. The web UI queues the request in LittleFS and reboots;
-// this runs early in setup() with the heap still free. The request is
-// consumed BEFORE the attempt, so a crash or failure can never boot-loop.
+// CDN URL, bypassing github.com's own redirect entirely. v2.9.22 stopped
+// doing that and let ESPhttpUpdate/HTTPClient chase the redirect itself for
+// BOTH attempts, the same as the always-worked 16 KB path always has.
+//
+// v2.9.24 (deferred mDNS/SNTP, see main.cpp) tested that heap theory on top
+// of the v2.9.22 fix and, over two live runs, found: the 16 KB attempt's
+// heap precheck still never passed (11640-14328 B largest block seen, never
+// the 17408 B needed -- deferring mDNS/SNTP didn't move that number, so
+// something else pins the heap that low the moment STA WiFi is up) -- AND,
+// more importantly, the 4 KB attempt's heap precheck had *never once*
+// failed, in any test, this whole session. The 4 KB path was never
+// heap-blocked; freeing heap could never have fixed it. Its real failure
+// both times was still a live-connection fault ("connection lost" once,
+// "Update error: ERROR[6]" / Stream Read Timeout the other) *during the
+// download itself*, after headers were already exchanged -- the same two
+// symptoms v2.9.22's fix was tested against, just with the hand-resolution
+// bug gone. That points at the one thing v2.9.22 removed along with the
+// hand-resolution: v2.9.21 and earlier MFLN-probed the resolved CDN host
+// directly before connecting to it, so the buffer size and the server's
+// actual TLS record size were confirmed to match. v2.9.22 onward stopped
+// resolving the CDN host at all (on purpose, to stop connecting to it
+// directly) but never replaced that probe -- it just guesses 4096 blind.
+// BearSSL's own setBufferSizes() doesn't negotiate anything by itself; if
+// the CDN host doesn't honor a 4096-byte MFLN request, the server is free to
+// send full-size (~16 KB) records the 4096+overhead buffer can't hold, and
+// that surfaces later, mid-download, as exactly this kind of stall/drop --
+// not as an obvious "buffer too small" error. otaResolveRedirectHost() below
+// restores the probe (learning the CDN host, then probing *it*, not
+// github.com) without restoring the bug: it's a separate, short-lived
+// connection that's fully closed before the real attempt, which still goes
+// through ESPhttpUpdate's own HTTPC_FORCE_FOLLOW_REDIRECTS on the original
+// github.com URL, exactly as v2.9.22 established. If the CDN turns out not
+// to honor MFLN at any size, the 4 KB attempt is skipped outright (a
+// mismatched small buffer is worse than not trying it) and only the 16 KB
+// attempt runs, gated on heap as before.
+//
+// The web UI queues the request in LittleFS and reboots; this runs early in
+// setup() with the heap still free. The request is consumed BEFORE the
+// attempt, so a crash or failure can never boot-loop.
 //
 // Testing note: this code only ever runs as part of the CURRENTLY INSTALLED
 // firmware. As long as the automatic download keeps failing, the device
@@ -199,10 +230,58 @@ String otaUpdateFromGitHub(const Settings& s) {
 // the same trap for the heap-fragmentation fix in main.cpp/Net.cpp (deferred
 // mDNS/SNTP past a queued update): it had to be flashed manually too, since
 // otherwise the OLD, already-installed fetch code -- with its own already-
-// fragmented heap -- would be the one "testing" it.
+// fragmented heap -- would be the one "testing" it. Expect the same for
+// this MFLN-probe fix: it must be flashed manually before a subsequent
+// release can meaningfully test it.
 #if defined(SMALLTV_ESP8266)
 static const char* OTA_REQ_PATH = "/ota.req";
 static const char* OTA_MSG_PATH = "/ota.msg";
+
+// Learns the hostname github.com's redirect points the release asset at,
+// purely so probeMfln() can test *that* host's real MFLN support before the
+// download below picks a buffer size -- see the file comment above for why
+// guessing a fixed size regressed once the old hand-resolution code (which
+// used to confirm this) was removed. This connection is intentionally
+// separate from, and fully closed before, the real download: it never
+// reuses the client, and the real attempt below still reaches r.url (the
+// original github.com URL) through ESPhttpUpdate's own
+// HTTPC_FORCE_FOLLOW_REDIRECTS, not through whatever this resolved. A small,
+// fixed 4 KB buffer is used for this lookup itself -- github.com's own host
+// has reliably supported that size all session (see otaCheckLatest above) --
+// so a failure here just means "couldn't learn the host", not a download
+// fault; the caller falls back to the pre-v2.9.26 fixed-4096-guess behavior
+// in that case rather than skipping the small attempt outright.
+static String otaResolveRedirectHost(const String& url) {
+  SecureClient client;
+  client.setInsecure();
+  client.setBufferSizes(4096, 512);
+
+  HTTPClient http;
+  http.setTimeout(8000);
+  http.setReuse(false);
+  http.setUserAgent(F(FW_NAME));
+  http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
+  const char* hdrKeys[] = { "Location" };
+  http.collectHeaders(hdrKeys, 1);
+
+  String host;
+  if (http.begin(client, url)) {
+    int code = http.GET();
+    if (code >= 300 && code < 400) {
+      String loc = http.header("Location");
+      int start = loc.indexOf("://");
+      if (start >= 0) {
+        start += 3;
+        int end = loc.indexOf('/', start);
+        host = (end > start) ? loc.substring(start, end) : loc.substring(start);
+        int colon = host.indexOf(':');
+        if (colon >= 0) host = host.substring(0, colon);
+      }
+    }
+    http.end();
+  }
+  return host;
+}
 
 bool otaBootRequested() { return LittleFS.exists(OTA_REQ_PATH); }
 
@@ -238,24 +317,43 @@ void otaBootUpdate(const Settings& s) {
 
   ESPhttpUpdate.rebootOnUpdate(true);
 
+  // Probe the CDN's actual MFLN support before picking the small attempt's
+  // buffer size (see the file-level comment above for the full reasoning: a
+  // guessed size the CDN doesn't honor is indistinguishable, until well into
+  // the download, from the "connection lost" / Stream Read Timeout failures
+  // this file has been chasing all session). otaResolveRedirectHost() is a
+  // separate, already-closed connection by this point -- the real attempts
+  // below are unaffected and still go through ESPhttpUpdate's own redirect
+  // handling on the original r.url.
+  String cdnHost = otaResolveRedirectHost(r.url);
+  uint16_t smallBuf = 4096;              // pre-v2.9.26 fallback if the lookup above failed
+  bool     haveMfln = false;
+  if (cdnHost.length()) {
+    smallBuf = probeMfln(cdnHost.c_str());
+    haveMfln = smallBuf < 16384;         // probeMfln returns 16384 itself when nothing smaller matched
+  }
+
   // Both attempts below let ESPhttpUpdate/HTTPClient chase github.com's own
   // redirect to the real, signed CDN URL (see the file-level comment above
   // for why: six straight live failures on a hand-resolved direct-to-CDN
   // connection, across four falsified theories, pointed at that hand
   // resolution itself rather than at buffer size, heap, retries, or URL
-  // freshness). They differ only in RX buffer size: "small" first, since
+  // freshness). "small" (now MFLN-probed, not guessed) runs first, since
   // this device's heap is fragmented enough that the largest contiguous
   // block has never once reached the 16 KB path's requirement in testing;
-  // "large" last, unconditionally, as the original proven size in case a
-  // less-fragmented boot allows it. Either way this can only let a
-  // tight-heap device through that used to fail outright — never make a
-  // working device worse.
+  // it's skipped outright when the CDN host was confirmed to support no
+  // fragment size smaller than 16 KB, since a mismatched small buffer is
+  // worse than not trying it. "large" always runs last, unconditionally, as
+  // the original proven size in case a less-fragmented boot allows it.
+  // Either way this can only let a tight-heap or MFLN-mismatched device
+  // through that used to fail outright — never make a working device worse.
   struct OtaAttempt { uint32_t rxBuf; const char* tag; };
-  OtaAttempt attempts[2] = {
-    { 4096,  "small" },
-    { 16384, "large" },
-  };
-  const uint8_t n = 2;
+  OtaAttempt attempts[2];
+  uint8_t n = 0;
+  if (haveMfln || cdnHost.length() == 0) {
+    attempts[n++] = { smallBuf, haveMfln ? "small(mfln)" : "small" };
+  }
+  attempts[n++] = { 16384, "large" };
 
   // Every attempt's outcome, not just the last one — otherwise the "large"
   // attempt's heap-check failure (which needs the biggest contiguous block
@@ -284,6 +382,13 @@ void otaBootUpdate(const Settings& s) {
                       errsLen ? "; " : "", tag, (unsigned)rxBuf, err);
     if (n > 0) errsLen += (n < avail - 1) ? (size_t)n : (size_t)(avail - 1);
   };
+  // Record the skip itself when it happens — otherwise a report with only a
+  // "large" entry looks identical to a boot where the small attempt was
+  // never coded at all, and the whole point of probing first is to know
+  // *why* it didn't run.
+  if (cdnHost.length() && !haveMfln) {
+    record("small", 0, "skipped: CDN honors no MFLN size <16384 (checked 512/1024/4096)");
+  }
   for (uint8_t i = 0; i < n; i++) {
     uint32_t rxBuf = attempts[i].rxBuf;
     // rx + tx buffers plus BearSSL engine/stack-thunk overhead.
