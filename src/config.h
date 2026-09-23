@@ -12,7 +12,7 @@
 // Firmware identity
 // ---------------------------------------------------------------------------
 #define FW_NAME     "smalltv-mod"
-#define FW_VERSION  "2.9.23"
+#define FW_VERSION  "2.9.24"
 
 // Project / update references (shown in the web UI; used by the GitHub self-update).
 // Pointed at the jkjyys fork so both the manual "Update now" button and the
