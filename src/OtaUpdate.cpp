@@ -247,9 +247,20 @@ String otaUpdateFromGitHub(const Settings& s) {
 // gave the conclusive live result this comment opens with: the CDN honors
 // no MFLN size at all, and the 16 KB path's heap precheck still never
 // passes. v2.9.28 (otaDownloadRanged(), above) hit the same trap in turn:
-// flashed manually, booted fine (22048 B free heap, no crash) -- the real
-// test is whether THIS build can auto-update itself to v2.9.29 (a
-// docs-only bump, this commit) using the new Range-chunked path.
+// flashed manually, booted fine (22048 B free heap, no crash) -- and this
+// time the device's own "check automatically" background timer, not a
+// manual click, found v2.9.29 as soon as it was published and fired the
+// real test on its own: it queued the update and rebooted into
+// otaDownloadRanged(), which crashed (Exception, epc/addr both pointing at
+// a null-pointer virtual call) a few minutes later, then recovered cleanly
+// to a normal boot on v2.9.28 -- the request-consumed-before-attempt design
+// meant to prevent a boot loop worked exactly as intended. Root cause:
+// stream->readBytes() ran against a null WiFiClient* from getStreamPtr(),
+// unchecked, apparently possible even after a 206 on the reused keep-alive
+// connection. Fixed by folding that null/empty check into the existing
+// per-chunk retry loop (see otaDownloadRanged() above) instead of trusting
+// a 206 status alone. v2.9.29 will need its own manual flash + one more
+// release to genuinely retest this against a live automatic trigger again.
 #if defined(SMALLTV_ESP8266)
 static const char* OTA_REQ_PATH = "/ota.req";
 static const char* OTA_MSG_PATH = "/ota.msg";
@@ -368,19 +379,38 @@ static bool otaDownloadRanged(const String& url, String& err) {
     char rangeHdr[48];
     snprintf(rangeHdr, sizeof(rangeHdr), "bytes=%u-%u", (unsigned)offset, (unsigned)last);
 
+    // Retries a fresh begin()/GET() not just on a non-206 status, but also when
+    // the response looked fine (206) yet getStreamPtr() came back null or the
+    // body was reported empty -- a live device just hit exactly this on the
+    // reused connection (see the big comment above this function): a crash
+    // with epc/addr both pointing at a null-pointer virtual call, from
+    // stream->readBytes() below running against a null stream. A CDN response
+    // can apparently claim 206 on a reused keep-alive connection without a
+    // stream actually being ready every time; retrying with a brand new
+    // connection (a fresh http.begin(), not just re-reading the old one) is
+    // the same recovery already used for the small/large attempts' "connection
+    // lost" retries above, just applied at the chunk level here.
     int code = -1;
+    int chunkLen = 0;
+    WiFiClient* stream = nullptr;
     for (uint8_t retry = 0; retry < 3; retry++) {
       if (retry) delay(300);
       if (!http.begin(client, url)) continue;
       http.addHeader("Range", rangeHdr);
       code = http.GET();
-      if (code == 206) break;
+      if (code == 206) {
+        chunkLen = http.getSize();
+        if (chunkLen < 0) chunkLen = 0;
+        stream = http.getStreamPtr();
+        if (stream && chunkLen > 0) break;   // a response we can actually read
+      }
       http.end();
       code = -1;
+      stream = nullptr;
     }
-    if (code != 206) {
+    if (code != 206 || !stream) {
       err = "range GET failed at offset " + String(offset) +
-            (code == -1 ? String(" (no 206 after retries)") : (": HTTP " + String(code)));
+            (code == -1 ? String(" (no usable response after retries)") : (": HTTP " + String(code)));
       if (began) Update.end(false);
       return false;
     }
@@ -397,11 +427,8 @@ static bool otaDownloadRanged(const String& url, String& err) {
       began = true;
     }
 
-    int chunkLen = http.getSize();       // this response's body length, not the total
-    if (chunkLen < 0) chunkLen = 0;
-    WiFiClient* stream = http.getStreamPtr();
     int remaining = chunkLen;
-    bool chunkOk = (chunkLen > 0);
+    bool chunkOk = true;
     while (remaining > 0) {
       int toRead = (remaining < (int)sizeof(buf)) ? remaining : (int)sizeof(buf);
       int got = stream->readBytes(buf, toRead);
