@@ -188,8 +188,13 @@ void setup() {
   gfxBegin(g_settings);
   gfxBoot(g_safeMode ? "Crashed" : "SmallTV", FW_VERSION);
 
+  // Checked once, up front: the mDNS and SNTP arming below both get skipped
+  // (and run later instead) exactly when a GitHub update is queued for this
+  // boot -- see the comment above the OTA block for why.
+  bool otaPending = otaBootRequested();
+
   Serial.println("[boot] net");
-  netBegin(g_settings, bootProgress);
+  netBegin(g_settings, bootProgress, otaPending);
   // Arm SNTP now that WiFi (STA) is up — but only if night mode is enabled, so a
   // ticker-only device doesn't pay the SNTP heap cost (which can starve the cash.ch
   // TLS handshake on the ESP8266). clockReapply arms it iff needed. Skipped after a
@@ -197,7 +202,7 @@ void setup() {
   // device then comes up in safe mode, OTA-recoverable, instead of needing UART).
   // ...unless a WireGuard tunnel is configured, which needs the clock and only
   // exists on an ESP32 where the heap argument for the skip does not apply.
-  if (!g_safeMode || wgNeedsClock(g_settings)) clockReapply(g_settings);
+  if (!otaPending && (!g_safeMode || wgNeedsClock(g_settings))) clockReapply(g_settings);
 
   // Optional WireGuard tunnel (ESP32 targets). Arms the state machine only;
   // the bring-up itself runs from loop(), so nothing here can delay the web
@@ -208,12 +213,28 @@ void setup() {
   // A GitHub update queued from the web UI runs now, before the features claim
   // the heap (the download needs a 16 KB TLS buffer that only fits at boot).
   // On success it reboots into the new image; a no-op stub on the ESP32 targets.
-  if (otaBootRequested()) {
+  //
+  // mDNS and SNTP were skipped above specifically for this boot (netBegin's
+  // deferMdns arg / the otaPending check): both start a permanent, mid-arena
+  // heap allocation the moment WiFi comes up (see netStartMdns/clockReapply),
+  // and on this memory-tight chip that's exactly the class of problem this
+  // codebase already worked around once for the ticker's cash.ch fetch —
+  // fragmenting the largest contiguous block below what a TLS handshake
+  // needs, no matter how much *total* free heap remains. Every OTA download
+  // failure logged this whole session was of that shape: the 16 KB fallback
+  // attempt's own heap check never once passed, always short on contiguous
+  // space specifically, never on total free bytes. Starting mDNS/SNTP here
+  // instead costs nothing on a normal boot (they still run before the render
+  // loop) and gives the attempt below the most contiguous heap this boot
+  // will ever have.
+  if (otaPending) {
     Serial.println("[boot] github update");
     gfxBoot("SmallTV", "updating...");
     otaBootUpdate(g_settings);
     gfxBoot("SmallTV", "update failed");   // still here -> failed; details in the web UI
     delay(1200);
+    netStartMdns();
+    if (!g_safeMode || wgNeedsClock(g_settings)) clockReapply(g_settings);
   }
 
   Serial.println("[boot] web");

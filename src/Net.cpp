@@ -10,6 +10,7 @@ static uint32_t    g_lastReconnect = 0;
 static const Settings* g_cfg = nullptr;  // for runtime failover between saved networks
 static int8_t      g_curNet = -1;        // settings index of the joined network
 static uint32_t    g_downSince = 0;      // 0 = connected; else millis() the drop began
+static bool        g_mdnsStarted = false;
 
 static void startAP(const Settings& s) {
   g_mode = NET_AP;
@@ -27,7 +28,24 @@ static void startAP(const Settings& s) {
   g_dns.start(53, "*", apIP);
 }
 
-void netBegin(const Settings& s, void (*onProgress)(const char*)) {
+void netStartMdns() {
+  if (g_mdnsStarted || g_mode != NET_STA) return;   // once per boot, STA only
+  g_mdnsStarted = true;
+  if (MDNS.begin(g_hostname.c_str())) {
+    MDNS.addService("http", "tcp", 80);
+#if WITH_USAGE
+    // Discoverable usage-push service so the clawdmeter daemon can find and
+    // push to every SmallTV on the LAN (no hardcoded host). TXT carries the
+    // device id, firmware version, and the push path.
+    MDNS.addService("clawdmeter", "tcp", 80);
+    MDNS.addServiceTxt("clawdmeter", "tcp", "id",   g_hostname.c_str());
+    MDNS.addServiceTxt("clawdmeter", "tcp", "ver",  FW_VERSION);
+    MDNS.addServiceTxt("clawdmeter", "tcp", "path", "/api/usage");
+#endif
+  }
+}
+
+void netBegin(const Settings& s, void (*onProgress)(const char*), bool deferMdns) {
   g_cfg = &s;
   g_hostname = s.hostname.length() ? s.hostname : String(DEFAULT_HOSTNAME);
   WiFi.persistent(false);
@@ -97,18 +115,7 @@ void netBegin(const Settings& s, void (*onProgress)(const char*)) {
     if (WiFi.status() == WL_CONNECTED) {
       g_curNet = (int8_t)order[k];
       g_mode = NET_STA;
-      if (MDNS.begin(g_hostname.c_str())) {
-        MDNS.addService("http", "tcp", 80);
-#if WITH_USAGE
-        // Discoverable usage-push service so the clawdmeter daemon can find and
-        // push to every SmallTV on the LAN (no hardcoded host). TXT carries the
-        // device id, firmware version, and the push path.
-        MDNS.addService("clawdmeter", "tcp", 80);
-        MDNS.addServiceTxt("clawdmeter", "tcp", "id",   g_hostname.c_str());
-        MDNS.addServiceTxt("clawdmeter", "tcp", "ver",  FW_VERSION);
-        MDNS.addServiceTxt("clawdmeter", "tcp", "path", "/api/usage");
-#endif
-      }
+      if (!deferMdns) netStartMdns();
       if (onProgress) onProgress(WiFi.localIP().toString().c_str());
       return;
     }
