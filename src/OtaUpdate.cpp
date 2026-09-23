@@ -13,17 +13,12 @@
 // agreed to. 512/1024/4096 are the only fragment lengths the MFLN extension
 // (RFC 6066) defines, so all three get a real probe -- unlike the old version
 // of this function, which tried 512 and 1024 and then just ASSUMED 4096 would
-// work if neither did, without ever confirming the server would honor it. For
-// the small JSON GETs this is used for (otaCheckLatest, resolveDownloadTarget)
-// that assumption was harmless: the response is tiny either way. For the
-// resolved-host attempt in otaBootUpdate below -- an actual multi-hundred-KB
-// firmware transfer over many TLS records -- it wasn't: a real record bigger
-// than an unverified local RX buffer is exactly what produces a mid-transfer
-// "Stream Read Timeout" or "connection lost" instead of a clean handshake
-// failure, and that's what was observed happening on that path. If none of
-// the three sizes probe clean, fall back to the same unrestricted 16 KB
-// buffer the caller's own last-resort attempt already uses, rather than
-// gambling on a number the server never confirmed.
+// work if neither did, without ever confirming the server would honor it.
+// Used only for the small JSON GET in otaCheckLatest below, where the
+// response is tiny either way, so getting the probe "wrong" would be
+// harmless -- this just avoids allocating a bigger buffer than needed. The
+// firmware download itself (otaBootUpdate) doesn't probe MFLN on the CDN
+// host at all; see the comment above that function for why.
 static uint16_t probeMfln(const char* host) {
   if (BearSSL::WiFiClientSecure::probeMaxFragmentLength(host, 443, 512))  return 512;
   if (BearSSL::WiFiClientSecure::probeMaxFragmentLength(host, 443, 1024)) return 1024;
@@ -168,85 +163,30 @@ String otaUpdateFromGitHub(const Settings& s) {
 }
 
 // ---- update-at-boot (ESP8266) ----------------------------------------------
-// The asset download used to just assume it needed a full 16 KB BearSSL
-// receive buffer (github.com and the release-asset CDN "probably" don't
-// negotiate MFLN) -- inherited, never actually measured on this device. A
-// small-buffer-first attempt sized off an unrelated host (raw.githubusercontent
-// .com's quotes traffic, see GH_QUOTES_RXBUF) didn't hold up for the release
-// CDN in practice. Below, the real download host is resolved and MFLN-probed
-// live instead (see resolveDownloadTarget/probeMfln), so the small buffer this
-// tries first is a server-acknowledged number, not another guess -- with the
-// original, proven 16 KB path kept as an unconditional fallback so this still
-// can't make a working device worse. The web UI queues the request in
-// LittleFS and reboots; this runs early in setup() with the heap still free.
-// The request is consumed BEFORE the attempt, so a crash or failure can never
-// boot-loop.
+// Both attempts below go through github.com's own redirect
+// (HTTPC_FORCE_FOLLOW_REDIRECTS -- HTTPClient follows the 3xx to the real,
+// signed CDN URL itself) and differ only in RX buffer size. That's new as of
+// this version: an earlier design hand-resolved the redirect first (its own
+// GET to github.com, chased by hand) and then MFLN-probed the resolved CDN
+// host directly, so the small-buffer attempt connected straight to that
+// pre-resolved URL. On a live device that hand-resolved attempt failed the
+// same way -- "Stream Read Timeout" or "connection lost", never a heap or
+// buffer-size complaint -- six times running, surviving three different
+// fixes in turn (verifying the negotiated size, retrying same-URL, even
+// re-resolving a fresh URL immediately before each retry). Six identical
+// failures across four different theories point at the one thing all of
+// them shared and none of them tested: connecting directly to a pre-resolved
+// CDN URL, bypassing github.com's own redirect entirely. This version stops
+// doing that and lets ESPhttpUpdate/HTTPClient chase the redirect itself for
+// BOTH attempts, the same as the always-worked 16 KB path always has --
+// just with a smaller buffer tried first to fit this device's fragmented
+// heap, instead of assuming the small buffer also means a hand-resolved
+// direct connection. The web UI queues the request in LittleFS and reboots;
+// this runs early in setup() with the heap still free. The request is
+// consumed BEFORE the attempt, so a crash or failure can never boot-loop.
 #if defined(SMALLTV_ESP8266)
 static const char* OTA_REQ_PATH = "/ota.req";
 static const char* OTA_MSG_PATH = "/ota.msg";
-
-// Authority (host[:port]) of a "scheme://host[:port]/path" URL -- good enough
-// for the https:// URLs this file deals with.
-static void hostFromUrl(const String& url, char* out, size_t n) {
-  int start = url.indexOf("://");
-  start = (start < 0) ? 0 : start + 3;
-  int end = url.indexOf('/', start);
-  if (end < 0) end = url.length();
-  strlcpy(out, url.substring(start, end).c_str(), n);
-}
-
-// GitHub's release-asset URL (browser_download_url, itself on github.com)
-// redirects once to a signed, time-limited CDN URL -- historically something
-// under githubusercontent.com, but that's changed before and isn't worth
-// hardcoding, let alone assuming it behaves like raw.githubusercontent.com
-// (a different host doing different traffic). That CDN is where the actual
-// multi-hundred-KB firmware transfer happens, so it's the host whose TLS
-// record size actually matters for buffer sizing. Resolve it with a request
-// small enough to always afford -- github.com's own redirect response has
-// next to no body -- then hand the caller the real host to MFLN-probe.
-// Returns false only when even this small preliminary request couldn't
-// connect at all; the caller's own 16 KB/original-URL fallback covers that.
-//
-// Chases up to 3 hops rather than assuming exactly one: github.com's own
-// redirect chain for a release asset has been just the one hop in practice,
-// but that's an observation, not a contract GitHub has made, and this file's
-// own history is "it changed CDN once already" (see the comment above). One
-// hop was silently assumed here before — if a future chain adds a second
-// redirect, the resolved attempt would probe/connect to an intermediate
-// host instead of the real download host, ESPhttpUpdate.update() would then
-// see a 3xx it's told not to follow (forceRedirect=false), fail, and that
-// failure used to get thrown away entirely whenever the 16 KB fallback also
-// failed its own heap check — see the per-attempt `errs` accumulation in
-// otaBootUpdate() below, added for exactly this kind of silently-swallowed
-// failure.
-static bool resolveDownloadTarget(const Settings& s, const String& url,
-                                   String& outUrl, char* outHost, size_t hostLen) {
-  outUrl = url;
-  for (uint8_t hop = 0; hop < 3; hop++) {
-    char host[80];
-    hostFromUrl(outUrl, host, sizeof(host));
-
-    BearSSL::WiFiClientSecure client;
-    client.setInsecure();
-    client.setBufferSizes(probeMfln(host), 512);
-
-    HTTPClient http;
-    http.setTimeout(s.httpTimeout);
-    http.setUserAgent(F(FW_NAME));
-    http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);   // chased by hand, one hop per loop
-    if (!http.begin(client, outUrl)) return false;
-    int code = http.GET();
-    bool ok = (code > 0);                                       // a real response, whatever its status
-    bool redirected = (code >= 300 && code < 400 && http.getLocation().length() > 0);
-    if (redirected) outUrl = http.getLocation();
-    http.end();
-
-    if (!ok) return false;
-    if (!redirected) { hostFromUrl(outUrl, outHost, hostLen); return true; }
-    // else: loop once more against the new outUrl
-  }
-  return false;   // too many hops — give up; caller's 16 KB fallback still runs
-}
 
 bool otaBootRequested() { return LittleFS.exists(OTA_REQ_PATH); }
 
@@ -282,41 +222,29 @@ void otaBootUpdate(const Settings& s) {
 
   ESPhttpUpdate.rebootOnUpdate(true);
 
-  // Resolve the release asset's real download host (the browser_download_url
-  // itself just 302s to a signed, time-limited CDN URL — see
-  // resolveDownloadTarget above). If resolution itself fails for any reason,
-  // skip straight to the unconditional fallback below. Either way, the
-  // original, proven 16 KB / unresolved-URL / force-redirect path always runs
-  // last, so this can only let a tight-heap device through that the old code
-  // would have failed anyway — never make a working device worse.
-  //
-  // The "resolved" attempt below deliberately does NOT probe MFLN on the
-  // resolved host before downloading (an earlier version of this file did).
-  // Probing costs its own full TLS handshake per candidate size — up to
-  // three, for 512/1024/4096 — and a live device failed this exact attempt
-  // five times in a row with "Stream Read Timeout" or "connection lost",
-  // always at the same stage, immune to a same-URL retry, and unaffected by
-  // switching to a server-confirmed buffer size. That pattern fits a signed
-  // URL that's gone stale by the time it's finally used better than it fits
-  // a buffer-size problem: resolveDownloadTarget's own per-hop probing, then
-  // three more probe handshakes against the resolved host, can easily burn
-  // several seconds — all before the URL is used even once — on a chip whose
-  // BearSSL handshakes aren't fast, especially over this device's borderline
-  // WiFi signal. So this attempt is re-resolved fresh immediately before
-  // each try (initial and retry alike) and uses a fixed 4096B buffer, the
-  // size this class of host has repeatedly confirmed via the old probe-first
-  // code — spending the saved handshakes on getting to the real download
-  // sooner instead.
-  struct OtaAttempt { uint32_t rxBuf; bool reresolve; bool forceRedirect; const char* tag; };
-  OtaAttempt attempts[2];
-  uint8_t n = 0;
-  attempts[n].rxBuf = 4096;  attempts[n].reresolve = true;  attempts[n].forceRedirect = false; attempts[n].tag = "resolved"; n++;
-  attempts[n].rxBuf = 16384; attempts[n].reresolve = false; attempts[n].forceRedirect = true;  attempts[n].tag = "fallback"; n++;
+  // Both attempts below let ESPhttpUpdate/HTTPClient chase github.com's own
+  // redirect to the real, signed CDN URL (see the file-level comment above
+  // for why: six straight live failures on a hand-resolved direct-to-CDN
+  // connection, across four falsified theories, pointed at that hand
+  // resolution itself rather than at buffer size, heap, retries, or URL
+  // freshness). They differ only in RX buffer size: "small" first, since
+  // this device's heap is fragmented enough that the largest contiguous
+  // block has never once reached the 16 KB path's requirement in testing;
+  // "large" last, unconditionally, as the original proven size in case a
+  // less-fragmented boot allows it. Either way this can only let a
+  // tight-heap device through that used to fail outright — never make a
+  // working device worse.
+  struct OtaAttempt { uint32_t rxBuf; const char* tag; };
+  OtaAttempt attempts[2] = {
+    { 4096,  "small" },
+    { 16384, "large" },
+  };
+  const uint8_t n = 2;
 
-  // Every attempt's outcome, not just the last one — otherwise a fallback
-  // heap-check failure (which needs the biggest contiguous block of the two,
-  // so it's the one most likely to fail) silently overwrites whatever the
-  // small resolved-buffer attempt actually hit, and a boot-only report with
+  // Every attempt's outcome, not just the last one — otherwise the "large"
+  // attempt's heap-check failure (which needs the biggest contiguous block
+  // of the two, so it's the one most likely to fail) silently overwrites
+  // whatever the "small" attempt actually hit, and a boot-only report with
   // no serial console has no other way to see that.
   //
   // Built with snprintf into a fixed stack buffer, NOT chained Arduino
@@ -370,33 +298,18 @@ void otaBootUpdate(const Settings& s) {
       continue;   // this size didn't even get to try — see if another attempt is left
     }
 
-    // Retried up to twice. For "resolved", each try (including the retry)
-    // re-resolves the download target from scratch immediately beforehand —
-    // see the comment above the attempts[] setup for why reusing one
-    // resolved-once URL across a retry wouldn't actually test anything new.
+    // Retried once on a transient-looking error. Both tries hit the same
+    // r.url and let ESPhttpUpdate follow github.com's redirect itself.
     String lastErr;
     for (uint8_t retry = 0; retry < 2; retry++) {
       if (retry) delay(300);
 
-      String url;
-      if (attempts[i].reresolve) {
-        char host[80] = {0};
-        if (!resolveDownloadTarget(s, r.url, url, host, sizeof(host)) || !host[0]) {
-          lastErr = F("could not resolve/probe the real download host");
-          continue;   // try again (fresh resolve) or fall through to record() below
-        }
-      } else {
-        url = r.url;
-      }
-
       BearSSL::WiFiClientSecure client;
       client.setInsecure();
       client.setBufferSizes(rxBuf, 512);
-      ESPhttpUpdate.setFollowRedirects(attempts[i].forceRedirect
-                                            ? HTTPC_FORCE_FOLLOW_REDIRECTS
-                                            : HTTPC_DISABLE_FOLLOW_REDIRECTS);
+      ESPhttpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
 
-      t_httpUpdate_return ret = ESPhttpUpdate.update(client, url);
+      t_httpUpdate_return ret = ESPhttpUpdate.update(client, r.url);
       if (ret == HTTP_UPDATE_OK) return;                   // rebootOnUpdate restarts into the new image
       if (ret == HTTP_UPDATE_NO_UPDATES) { otaBootResult(F("server reported no update")); return; }
       lastErr = ESPhttpUpdate.getLastErrorString();
