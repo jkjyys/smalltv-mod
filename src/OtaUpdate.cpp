@@ -184,6 +184,18 @@ String otaUpdateFromGitHub(const Settings& s) {
 // direct connection. The web UI queues the request in LittleFS and reboots;
 // this runs early in setup() with the heap still free. The request is
 // consumed BEFORE the attempt, so a crash or failure can never boot-loop.
+//
+// Testing note: this code only ever runs as part of the CURRENTLY INSTALLED
+// firmware. As long as the automatic download keeps failing, the device
+// never advances, so every fix pushed here keeps getting "tested" by
+// re-running whatever fetch logic was already on the device -- not the new
+// code just pushed. Verifying a fix for real requires landing it on the
+// device first (manual upload, System tab) and then testing whether THAT
+// build can auto-update itself to a subsequent release. v2.9.22 hit exactly
+// this: the error strings the device kept reporting ("resolved (4096B)"/
+// "fallback (16384B)") were still v2.9.21's tags long after v2.9.22 was
+// pushed and its automatic OTA "succeeded" at nothing -- proof the fetch
+// code never actually changed until it was flashed manually.
 #if defined(SMALLTV_ESP8266)
 static const char* OTA_REQ_PATH = "/ota.req";
 static const char* OTA_MSG_PATH = "/ota.msg";
