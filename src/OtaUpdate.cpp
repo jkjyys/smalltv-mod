@@ -9,16 +9,22 @@
 #endif
 
 #if defined(SMALLTV_ESP8266)
+// Platform.h pulls in ESP8266httpUpdate.h for the ESPhttpUpdate global used
+// below, but that header doesn't itself declare the Update global (only its
+// own .cpp does) -- otaDownloadRanged() further down calls Update.begin()/
+// write()/end() directly, so it needs this include explicitly rather than
+// relying on it arriving transitively.
+#include <Updater.h>
 // Prefer MFLN so BearSSL can run with the smallest buffer the server actually
 // agreed to. 512/1024/4096 are the only fragment lengths the MFLN extension
 // (RFC 6066) defines, so all three get a real probe -- unlike the old version
 // of this function, which tried 512 and 1024 and then just ASSUMED 4096 would
 // work if neither did, without ever confirming the server would honor it.
-// Used only for the small JSON GET in otaCheckLatest below, where the
-// response is tiny either way, so getting the probe "wrong" would be
-// harmless -- this just avoids allocating a bigger buffer than needed. The
-// firmware download itself (otaBootUpdate) doesn't probe MFLN on the CDN
-// host at all; see the comment above that function for why.
+// Used for the small JSON GET in otaCheckLatest below (response is tiny
+// either way, so getting the probe "wrong" would be harmless -- this just
+// avoids allocating a bigger buffer than needed), and reused by
+// otaBootUpdate() below to size its own small-buffer attempt against the
+// CDN host specifically -- see the big comment above that function.
 static uint16_t probeMfln(const char* host) {
   if (BearSSL::WiFiClientSecure::probeMaxFragmentLength(host, 443, 512))  return 512;
   if (BearSSL::WiFiClientSecure::probeMaxFragmentLength(host, 443, 1024)) return 1024;
@@ -202,15 +208,20 @@ String otaUpdateFromGitHub(const Settings& s) {
 // the CDN host doesn't honor a 4096-byte MFLN request, the server is free to
 // send full-size (~16 KB) records the 4096+overhead buffer can't hold, and
 // that surfaces later, mid-download, as exactly this kind of stall/drop --
-// not as an obvious "buffer too small" error. otaResolveRedirectHost() below
-// restores the probe (learning the CDN host, then probing *it*, not
-// github.com) without restoring the bug: it's a separate, short-lived
-// connection that's fully closed before the real attempt, which still goes
-// through ESPhttpUpdate's own HTTPC_FORCE_FOLLOW_REDIRECTS on the original
-// github.com URL, exactly as v2.9.22 established. If the CDN turns out not
-// to honor MFLN at any size, the 4 KB attempt is skipped outright (a
-// mismatched small buffer is worse than not trying it) and only the 16 KB
-// attempt runs, gated on heap as before.
+// not as an obvious "buffer too small" error. otaResolveRedirect()/
+// otaUrlHost() below restore the probe (learning the CDN host, then probing
+// *it*, not github.com) without restoring the bug: it's a separate,
+// short-lived connection that's fully closed before the small/large
+// attempts, which still go through ESPhttpUpdate's own
+// HTTPC_FORCE_FOLLOW_REDIRECTS on the original github.com URL, exactly as
+// v2.9.22 established. If the CDN turns out not to honor MFLN at any size,
+// the 4 KB attempt is skipped outright (a mismatched small buffer is worse
+// than not trying it) and only the 16 KB attempt runs, gated on heap as
+// before -- and, confirmed live on v2.9.26 (see below), that CDN really
+// doesn't honor MFLN at all, so v2.9.28 adds a third, structurally
+// different attempt (otaDownloadRanged(), also below) that sidesteps the
+// whole MFLN/heap question via small HTTP Range requests instead of one
+// streamed response.
 //
 // The web UI queues the request in LittleFS and reboots; this runs early in
 // setup() with the heap still free. The request is consumed BEFORE the
@@ -230,30 +241,47 @@ String otaUpdateFromGitHub(const Settings& s) {
 // the same trap for the heap-fragmentation fix in main.cpp/Net.cpp (deferred
 // mDNS/SNTP past a queued update): it had to be flashed manually too, since
 // otherwise the OLD, already-installed fetch code -- with its own already-
-// fragmented heap -- would be the one "testing" it. Expect the same for
-// this MFLN-probe fix: it must be flashed manually before a subsequent
-// release can meaningfully test it. (Confirmed: v2.9.26 -- this fix -- was
-// flashed manually and boots fine; this docs-only commit exists purely to
-// give it a v2.9.27 to genuinely try auto-updating to.)
+// fragmented heap -- would be the one "testing" it. v2.9.26 (this file's
+// MFLN-probe fix) hit it again identically, and was flashed manually and
+// confirmed booting fine; testing it against v2.9.27 (a docs-only bump)
+// gave the conclusive live result this comment opens with: the CDN honors
+// no MFLN size at all, and the 16 KB path's heap precheck still never
+// passes. v2.9.28 (otaDownloadRanged(), below) will need the same manual
+// flash + one more release before it can be genuinely tested in turn.
 #if defined(SMALLTV_ESP8266)
 static const char* OTA_REQ_PATH = "/ota.req";
 static const char* OTA_MSG_PATH = "/ota.msg";
 
-// Learns the hostname github.com's redirect points the release asset at,
-// purely so probeMfln() can test *that* host's real MFLN support before the
-// download below picks a buffer size -- see the file comment above for why
-// guessing a fixed size regressed once the old hand-resolution code (which
-// used to confirm this) was removed. This connection is intentionally
-// separate from, and fully closed before, the real download: it never
-// reuses the client, and the real attempt below still reaches r.url (the
-// original github.com URL) through ESPhttpUpdate's own
-// HTTPC_FORCE_FOLLOW_REDIRECTS, not through whatever this resolved. A small,
-// fixed 4 KB buffer is used for this lookup itself -- github.com's own host
-// has reliably supported that size all session (see otaCheckLatest above) --
-// so a failure here just means "couldn't learn the host", not a download
-// fault; the caller falls back to the pre-v2.9.26 fixed-4096-guess behavior
-// in that case rather than skipping the small attempt outright.
-static String otaResolveRedirectHost(const String& url) {
+// Pulls the "host[:port]" component out of an "https://host[:port]/path..."
+// URL. Used to get a bare hostname to hand to probeMaxFragmentLength()/
+// probeMfln(), which take a host, not a URL.
+static String otaUrlHost(const String& url) {
+  int start = url.indexOf("://");
+  if (start < 0) return String();
+  start += 3;
+  int end = url.indexOf('/', start);
+  String host = (end > start) ? url.substring(start, end) : url.substring(start);
+  int colon = host.indexOf(':');
+  if (colon >= 0) host = host.substring(0, colon);
+  return host;
+}
+
+// Learns the URL github.com's redirect points the release asset at (the
+// signed, time-limited CDN URL) -- purely to *look at* it (probeMfln() on
+// its host below, or reusing the URL itself for otaDownloadRanged()'s
+// keep-alive chunk requests further down); this connection is intentionally
+// separate from, and fully closed before, either use. Connecting straight
+// to a pre-resolved CDN URL for a *single, full-size* download attempt was
+// the blamed cause of six identical failures earlier this session (see the
+// file-level comment above) -- but that was about the download itself, not
+// about looking up where it points, and otaDownloadRanged()'s requests are
+// each individually Range-bounded and small regardless of this URL's
+// origin, so reusing it there doesn't reintroduce that bug. A small, fixed
+// 4 KB buffer is used for this lookup -- github.com's own host has reliably
+// supported that size all session (see otaCheckLatest above) -- so a
+// failure here just means "couldn't learn the URL", not a download fault;
+// callers fall back to their own pre-v2.9.26 behavior in that case.
+static String otaResolveRedirect(const String& url) {
   SecureClient client;
   client.setInsecure();
   client.setBufferSizes(4096, 512);
@@ -266,23 +294,132 @@ static String otaResolveRedirectHost(const String& url) {
   const char* hdrKeys[] = { "Location" };
   http.collectHeaders(hdrKeys, 1);
 
-  String host;
+  String loc;
   if (http.begin(client, url)) {
     int code = http.GET();
-    if (code >= 300 && code < 400) {
-      String loc = http.header("Location");
-      int start = loc.indexOf("://");
-      if (start >= 0) {
-        start += 3;
-        int end = loc.indexOf('/', start);
-        host = (end > start) ? loc.substring(start, end) : loc.substring(start);
-        int colon = host.indexOf(':');
-        if (colon >= 0) host = host.substring(0, colon);
-      }
-    }
+    if (code >= 300 && code < 400) loc = http.header("Location");
     http.end();
   }
-  return host;
+  return loc;
+}
+
+// Downloads and flashes the firmware in small, HTTP Range-bounded chunks
+// over ONE reused HTTPS connection, instead of asking the server to hold to
+// a small TLS record size for one continuous streamed response. Directly
+// probing this CDN (see otaResolveRedirect/otaUrlHost above and the
+// file-level comment) confirmed it honors no MFLN fragment size under
+// 16384 bytes -- so it always frames a plain streamed response in
+// full-size (~16 KB) TLS records -- while this device has never once
+// freed more than ~14 KB of *contiguous* heap while WiFi is up, even with
+// mDNS/SNTP deferred past the download (v2.9.24). Those two numbers don't
+// meet: 16 KB records need a buffer this chip can't reliably clear. A
+// Range-bounded response can't legally arrive wrapped in a TLS record
+// bigger than the response itself, though, so keeping each request's
+// response small (RANGE_CHUNK bytes of body, comfortably under
+// RANGE_BUF's capacity once headers and TLS framing are accounted for)
+// sidesteps the ceiling entirely instead of trying to raise it further.
+// One TLS connection is opened and reused (HTTPClient's setReuse) across
+// every chunk: partly to avoid ~100 separate handshakes, partly because
+// reusing one already-allocated set of BearSSL buffers can't progressively
+// fragment the heap the way repeated per-chunk alloc/free cycles could.
+static const uint32_t RANGE_BUF   = 8192;  // TLS RX buffer; needs ~9216B contiguous --
+                                            // comfortably under the ~14 KB ceiling above
+static const uint32_t RANGE_CHUNK = 7168;  // body bytes/request; leaves ~1KB of RANGE_BUF
+                                            // for response headers + TLS record overhead
+
+static bool otaDownloadRanged(const String& url, String& err) {
+  const uint32_t need    = RANGE_BUF + 512 + 8000;
+  const uint32_t needBlk = RANGE_BUF + 1024;
+  for (int tries = 0; tries < 12; tries++) {
+    if (ESP.getFreeHeap() >= need && ESP.getMaxFreeBlockSize() >= needBlk) break;
+    delay(250);
+  }
+  if (ESP.getFreeHeap() < need || ESP.getMaxFreeBlockSize() < needBlk) {
+    char msg[100];
+    snprintf(msg, sizeof(msg), "not enough heap (%u free, %u largest block, need %u / %u)",
+             (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxFreeBlockSize(),
+             (unsigned)need, (unsigned)needBlk);
+    err = msg;
+    return false;
+  }
+
+  SecureClient client;
+  client.setInsecure();
+  client.setBufferSizes(RANGE_BUF, 512);
+
+  HTTPClient http;
+  http.setTimeout(15000);
+  http.setReuse(true);              // keep the TLS session alive across chunk requests
+  http.setUserAgent(F(FW_NAME));
+  http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);  // this IS the resolved URL already
+  const char* hdrKeys[] = { "Content-Range" };
+  http.collectHeaders(hdrKeys, 1);
+
+  uint32_t total  = 0;     // learned from the first response's Content-Range
+  uint32_t offset = 0;
+  bool     began  = false; // Update.begin() has run
+  uint8_t  buf[512];
+
+  while (!began || offset < total) {
+    uint32_t last = began ? (((offset + RANGE_CHUNK < total) ? offset + RANGE_CHUNK : total) - 1)
+                           : (offset + RANGE_CHUNK - 1);
+    char rangeHdr[48];
+    snprintf(rangeHdr, sizeof(rangeHdr), "bytes=%u-%u", (unsigned)offset, (unsigned)last);
+
+    int code = -1;
+    for (uint8_t retry = 0; retry < 3; retry++) {
+      if (retry) delay(300);
+      if (!http.begin(client, url)) continue;
+      http.addHeader("Range", rangeHdr);
+      code = http.GET();
+      if (code == 206) break;
+      http.end();
+      code = -1;
+    }
+    if (code != 206) {
+      err = "range GET failed at offset " + String(offset) +
+            (code == -1 ? String(" (no 206 after retries)") : (": HTTP " + String(code)));
+      if (began) Update.end(false);
+      return false;
+    }
+
+    if (!began) {
+      String cr = http.header("Content-Range");           // "bytes 0-7167/695504"
+      int slash = cr.lastIndexOf('/');
+      total = (slash >= 0) ? (uint32_t)cr.substring(slash + 1).toInt() : 0;
+      if (!total || !Update.begin(total)) {
+        err = !total ? "no Content-Range in response" : "Update.begin failed";
+        http.end();
+        return false;
+      }
+      began = true;
+    }
+
+    int chunkLen = http.getSize();       // this response's body length, not the total
+    if (chunkLen < 0) chunkLen = 0;
+    WiFiClient* stream = http.getStreamPtr();
+    int remaining = chunkLen;
+    bool chunkOk = (chunkLen > 0);
+    while (remaining > 0) {
+      int toRead = (remaining < (int)sizeof(buf)) ? remaining : (int)sizeof(buf);
+      int got = stream->readBytes(buf, toRead);
+      if (got <= 0 || Update.write(buf, got) != (size_t)got) { chunkOk = false; break; }
+      remaining -= got;
+    }
+    http.end();
+    if (!chunkOk) {
+      err = "stream read failed at offset " + String(offset);
+      Update.end(false);
+      return false;
+    }
+    offset += (uint32_t)chunkLen;
+  }
+
+  if (!Update.end(true) || !Update.isFinished()) {
+    err = "Update.end failed, code " + String(Update.getError());
+    return false;
+  }
+  return true;   // caller reboots
 }
 
 bool otaBootRequested() { return LittleFS.exists(OTA_REQ_PATH); }
@@ -323,11 +460,11 @@ void otaBootUpdate(const Settings& s) {
   // buffer size (see the file-level comment above for the full reasoning: a
   // guessed size the CDN doesn't honor is indistinguishable, until well into
   // the download, from the "connection lost" / Stream Read Timeout failures
-  // this file has been chasing all session). otaResolveRedirectHost() is a
-  // separate, already-closed connection by this point -- the real attempts
+  // this file has been chasing all session). This resolve is a separate,
+  // already-closed connection by this point -- the small/large attempts
   // below are unaffected and still go through ESPhttpUpdate's own redirect
   // handling on the original r.url.
-  String cdnHost = otaResolveRedirectHost(r.url);
+  String cdnHost = otaUrlHost(otaResolveRedirect(r.url));
   uint16_t smallBuf = 4096;              // pre-v2.9.26 fallback if the lookup above failed
   bool     haveMfln = false;
   if (cdnHost.length()) {
@@ -375,7 +512,7 @@ void otaBootUpdate(const Settings& s) {
   // heap even at boot" reports this was added to explain) is exactly where
   // that risk stops being theoretical. snprintf only ever writes into a
   // buffer that's already on the stack, so it can't fail the same way.
-  char errs[300] = {0};
+  char errs[420] = {0};   // 3 possible entries now (small/large/ranged) -- was 300 for 2
   size_t errsLen = 0;
   auto record = [&errs, &errsLen](const char* tag, uint32_t rxBuf, const char* err) {
     int avail = (int)sizeof(errs) - (int)errsLen;
@@ -447,6 +584,27 @@ void otaBootUpdate(const Settings& s) {
     // rest of this file already accepts (e.g. every other otaBootResult call).
     record(attempts[i].tag, rxBuf, lastErr.c_str());
   }
+
+  // Both fixed-buffer attempts above are structurally doomed on a CDN that
+  // won't shrink its TLS records (see the big comment above
+  // otaDownloadRanged()): "small" either mismatches or gets skipped, and
+  // "large" needs more contiguous heap than this device has ever produced.
+  // Falls through to the Range-chunked approach as a last resort, on a
+  // freshly re-resolved URL (rather than reusing cdnHost's resolve from
+  // above) so a slow small/large loop above can't have let the signed URL's
+  // validity window run out before the real download even starts.
+  String rangedUrl = otaResolveRedirect(r.url);
+  if (rangedUrl.length()) {
+    String rangedErr;
+    if (otaDownloadRanged(rangedUrl, rangedErr)) {
+      ESP.restart();   // otaDownloadRanged() doesn't reboot itself -- ESPhttpUpdate.rebootOnUpdate does that for the other two attempts
+      return;          // never reached; defensive
+    }
+    record("ranged", RANGE_BUF, rangedErr.c_str());
+  } else {
+    record("ranged", 0, "couldn't re-resolve the CDN URL");
+  }
+
   otaBootResult(String("download failed: ") + errs);
 }
 #else
