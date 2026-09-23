@@ -283,43 +283,35 @@ void otaBootUpdate(const Settings& s) {
   ESPhttpUpdate.rebootOnUpdate(true);
 
   // Resolve the release asset's real download host (the browser_download_url
-  // itself just 302s to a signed CDN URL — see resolveDownloadTarget above)
-  // and MFLN-probe THAT host live, so the small buffer tried first is a
-  // number the server actually acknowledged rather than a guess borrowed from
-  // an unrelated host (that's what v2.9.9's 5120-byte guess was, and it
-  // didn't hold up against the real CDN). If resolution itself fails for any
-  // reason, skip straight to the unconditional fallback below. Either way,
-  // the original, proven 16 KB / unresolved-URL / force-redirect path always
-  // runs last, so this change can only let a tight-heap device through that
-  // the old code would have failed anyway — never make a working device
-  // worse.
-  struct OtaAttempt { uint32_t rxBuf; String url; bool forceRedirect; const char* tag; };
+  // itself just 302s to a signed, time-limited CDN URL — see
+  // resolveDownloadTarget above). If resolution itself fails for any reason,
+  // skip straight to the unconditional fallback below. Either way, the
+  // original, proven 16 KB / unresolved-URL / force-redirect path always runs
+  // last, so this can only let a tight-heap device through that the old code
+  // would have failed anyway — never make a working device worse.
+  //
+  // The "resolved" attempt below deliberately does NOT probe MFLN on the
+  // resolved host before downloading (an earlier version of this file did).
+  // Probing costs its own full TLS handshake per candidate size — up to
+  // three, for 512/1024/4096 — and a live device failed this exact attempt
+  // five times in a row with "Stream Read Timeout" or "connection lost",
+  // always at the same stage, immune to a same-URL retry, and unaffected by
+  // switching to a server-confirmed buffer size. That pattern fits a signed
+  // URL that's gone stale by the time it's finally used better than it fits
+  // a buffer-size problem: resolveDownloadTarget's own per-hop probing, then
+  // three more probe handshakes against the resolved host, can easily burn
+  // several seconds — all before the URL is used even once — on a chip whose
+  // BearSSL handshakes aren't fast, especially over this device's borderline
+  // WiFi signal. So this attempt is re-resolved fresh immediately before
+  // each try (initial and retry alike) and uses a fixed 4096B buffer, the
+  // size this class of host has repeatedly confirmed via the old probe-first
+  // code — spending the saved handshakes on getting to the real download
+  // sooner instead.
+  struct OtaAttempt { uint32_t rxBuf; bool reresolve; bool forceRedirect; const char* tag; };
   OtaAttempt attempts[2];
   uint8_t n = 0;
-
-  // Kept even on success so a failure below can say plainly "resolve itself
-  // never worked" instead of silently only ever showing the fallback's error
-  // (see the accumulated `errs` below — that ambiguity is exactly what made
-  // v2.9.15's real "still fails sometimes" boil down to a bare heap number
-  // with no way to tell which of the two attempts, or which failure mode,
-  // actually produced it).
-  bool resolveOk = false;
-  String resolvedUrl;
-  char resolvedHost[80] = {0};
-  if (resolveDownloadTarget(s, r.url, resolvedUrl, resolvedHost, sizeof(resolvedHost)) &&
-      resolvedHost[0]) {
-    resolveOk = true;
-    attempts[n].rxBuf        = probeMfln(resolvedHost);
-    attempts[n].url          = resolvedUrl;
-    attempts[n].forceRedirect = false;   // already resolved by hand above
-    attempts[n].tag           = "resolved";
-    n++;
-  }
-  attempts[n].rxBuf         = 16384;
-  attempts[n].url           = r.url;
-  attempts[n].forceRedirect = true;      // let the client itself chase the redirect
-  attempts[n].tag           = "fallback";
-  n++;
+  attempts[n].rxBuf = 4096;  attempts[n].reresolve = true;  attempts[n].forceRedirect = false; attempts[n].tag = "resolved"; n++;
+  attempts[n].rxBuf = 16384; attempts[n].reresolve = false; attempts[n].forceRedirect = true;  attempts[n].tag = "fallback"; n++;
 
   // Every attempt's outcome, not just the last one — otherwise a fallback
   // heap-check failure (which needs the biggest contiguous block of the two,
@@ -348,8 +340,6 @@ void otaBootUpdate(const Settings& s) {
                       errsLen ? "; " : "", tag, (unsigned)rxBuf, err);
     if (n > 0) errsLen += (n < avail - 1) ? (size_t)n : (size_t)(avail - 1);
   };
-  if (!resolveOk) record("resolve", 0, "could not resolve/probe the real download host, skipped");
-
   for (uint8_t i = 0; i < n; i++) {
     uint32_t rxBuf = attempts[i].rxBuf;
     // rx + tx buffers plus BearSSL engine/stack-thunk overhead.
@@ -380,20 +370,25 @@ void otaBootUpdate(const Settings& s) {
       continue;   // this size didn't even get to try — see if another attempt is left
     }
 
-    // A live device tried this exact resolved/small-buffer combination three
-    // times in a row and failed three different ways ("Stream Read Timeout",
-    // "connection lost" x2) — never a buffer-size complaint, and confirmed
-    // MFLN didn't change the outcome (see probeMfln above). A ~700 KB
-    // transfer at a 4 KB (or smaller) buffer needs on the order of a hundred-
-    // plus TLS reads to complete; on this device's borderline WiFi signal
-    // (-49 to -54 dBm in the field), that's a hundred-plus chances for one
-    // read to stall, versus roughly a dozen at the fallback's 16 KB. So this
-    // looks like ordinary transfer-time flakiness, not a deterministic bug —
-    // worth one immediate retry (fresh connection, same size) before giving
-    // up on this attempt and eating into the next one's heap.
+    // Retried up to twice. For "resolved", each try (including the retry)
+    // re-resolves the download target from scratch immediately beforehand —
+    // see the comment above the attempts[] setup for why reusing one
+    // resolved-once URL across a retry wouldn't actually test anything new.
     String lastErr;
     for (uint8_t retry = 0; retry < 2; retry++) {
       if (retry) delay(300);
+
+      String url;
+      if (attempts[i].reresolve) {
+        char host[80] = {0};
+        if (!resolveDownloadTarget(s, r.url, url, host, sizeof(host)) || !host[0]) {
+          lastErr = F("could not resolve/probe the real download host");
+          continue;   // try again (fresh resolve) or fall through to record() below
+        }
+      } else {
+        url = r.url;
+      }
+
       BearSSL::WiFiClientSecure client;
       client.setInsecure();
       client.setBufferSizes(rxBuf, 512);
@@ -401,7 +396,7 @@ void otaBootUpdate(const Settings& s) {
                                             ? HTTPC_FORCE_FOLLOW_REDIRECTS
                                             : HTTPC_DISABLE_FOLLOW_REDIRECTS);
 
-      t_httpUpdate_return ret = ESPhttpUpdate.update(client, attempts[i].url);
+      t_httpUpdate_return ret = ESPhttpUpdate.update(client, url);
       if (ret == HTTP_UPDATE_OK) return;                   // rebootOnUpdate restarts into the new image
       if (ret == HTTP_UPDATE_NO_UPDATES) { otaBootResult(F("server reported no update")); return; }
       lastErr = ESPhttpUpdate.getLastErrorString();
