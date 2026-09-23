@@ -311,12 +311,29 @@ void otaBootUpdate(const Settings& s) {
   // so it's the one most likely to fail) silently overwrites whatever the
   // small resolved-buffer attempt actually hit, and a boot-only report with
   // no serial console has no other way to see that.
-  String errs;
-  auto record = [&errs](const char* tag, uint32_t rxBuf, const String& err) {
-    if (errs.length()) errs += "; ";
-    errs += String(tag) + " (" + String(rxBuf) + "B): " + err;
+  //
+  // Built with snprintf into a fixed stack buffer, NOT chained Arduino
+  // String concatenation (`a + b + c + ...`). This function's very first
+  // caller of `record()` below can be the "not enough heap" branch — i.e.
+  // every one of these messages can be built at the exact moment the heap
+  // has just been found critically low/fragmented. Each `+` on a String
+  // allocates a new heap block for its temporary result; chaining several
+  // of them (as this used to) right when allocation is already failing
+  // risks the allocator itself, not just this diagnostic, and a device that
+  // was already landing in this exact low-heap branch (see the "not enough
+  // heap even at boot" reports this was added to explain) is exactly where
+  // that risk stops being theoretical. snprintf only ever writes into a
+  // buffer that's already on the stack, so it can't fail the same way.
+  char errs[300] = {0};
+  size_t errsLen = 0;
+  auto record = [&errs, &errsLen](const char* tag, uint32_t rxBuf, const char* err) {
+    int avail = (int)sizeof(errs) - (int)errsLen;
+    if (avail <= 1) return;
+    int n = snprintf(errs + errsLen, avail, "%s%s (%uB): %s",
+                      errsLen ? "; " : "", tag, (unsigned)rxBuf, err);
+    if (n > 0) errsLen += (n < avail - 1) ? (size_t)n : (size_t)(avail - 1);
   };
-  if (!resolveOk) record("resolve", 0, F("could not resolve/probe the real download host, skipped"));
+  if (!resolveOk) record("resolve", 0, "could not resolve/probe the real download host, skipped");
 
   for (uint8_t i = 0; i < n; i++) {
     uint32_t rxBuf = attempts[i].rxBuf;
@@ -339,10 +356,12 @@ void otaBootUpdate(const Settings& s) {
       delay(250);
     }
     if (ESP.getFreeHeap() < need || ESP.getMaxFreeBlockSize() < needBlk) {
-      record(attempts[i].tag, rxBuf,
-             "not enough heap (" + String(ESP.getFreeHeap()) + " free, " +
-             String(ESP.getMaxFreeBlockSize()) + " largest block, need " +
-             String(need) + " free / " + String(needBlk) + " contiguous)");
+      char msg[110];
+      snprintf(msg, sizeof(msg),
+               "not enough heap (%u free, %u largest block, need %u free / %u contiguous)",
+               (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxFreeBlockSize(),
+               (unsigned)need, (unsigned)needBlk);
+      record(attempts[i].tag, rxBuf, msg);
       continue;   // this size didn't even get to try — see if another attempt is left
     }
 
@@ -356,9 +375,13 @@ void otaBootUpdate(const Settings& s) {
     t_httpUpdate_return ret = ESPhttpUpdate.update(client, attempts[i].url);
     if (ret == HTTP_UPDATE_OK) return;                     // rebootOnUpdate restarts into the new image
     if (ret == HTTP_UPDATE_NO_UPDATES) { otaBootResult(F("server reported no update")); return; }
-    record(attempts[i].tag, rxBuf, ESPhttpUpdate.getLastErrorString());
+    // getLastErrorString() only runs after a real attempt was made (the heap
+    // check above passed), so heap is no longer the knife-edge it is in the
+    // branch above — a single bounded String copy here is the same risk the
+    // rest of this file already accepts (e.g. every other otaBootResult call).
+    record(attempts[i].tag, rxBuf, ESPhttpUpdate.getLastErrorString().c_str());
   }
-  otaBootResult("download failed: " + errs);
+  otaBootResult(String("download failed: ") + errs);
 }
 #else
 bool   otaBootRequested() { return false; }
