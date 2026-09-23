@@ -195,7 +195,11 @@ String otaUpdateFromGitHub(const Settings& s) {
 // this: the error strings the device kept reporting ("resolved (4096B)"/
 // "fallback (16384B)") were still v2.9.21's tags long after v2.9.22 was
 // pushed and its automatic OTA "succeeded" at nothing -- proof the fetch
-// code never actually changed until it was flashed manually.
+// code never actually changed until it was flashed manually. v2.9.24 hit
+// the same trap for the heap-fragmentation fix in main.cpp/Net.cpp (deferred
+// mDNS/SNTP past a queued update): it had to be flashed manually too, since
+// otherwise the OLD, already-installed fetch code -- with its own already-
+// fragmented heap -- would be the one "testing" it.
 #if defined(SMALLTV_ESP8266)
 static const char* OTA_REQ_PATH = "/ota.req";
 static const char* OTA_MSG_PATH = "/ota.msg";
