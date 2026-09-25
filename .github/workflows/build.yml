@@ -15,6 +15,21 @@ permissions:
 jobs:
   firmware:
     runs-on: ubuntu-latest
+    env:
+      # Pushes to main build only the SmallTV-Ultra image (env smalltv) -- the
+      # one this fork's hardware runs and its on-device auto-updater installs
+      # -- which cuts a push's build from ~9 minutes to a few. Every other
+      # trigger (Actions tab -> build -> Run workflow, a manually pushed v* tag,
+      # a pull request) still builds all five targets, as before.
+      TARGETS: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && 'smalltv' || 'smalltv smalltv_loader smalltv_esp32 smalltv_esp32_8mb smalltv_c2' }}
+      # Separate caches for the two target sets, so a push only restores the
+      # ESP8266 toolchain instead of also pulling down the (much larger) ESP32
+      # ones it no longer uses.
+      PIO_CACHE_SCOPE: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && 'esp8266' || 'all' }}
+      # PlatformIO's compiled-object cache: the Arduino core and libraries
+      # compile to the same objects every run, so reusing them leaves only the
+      # project's own sources to rebuild. Kept inside the cached paths below.
+      PLATFORMIO_BUILD_CACHE_DIR: ${{ github.workspace }}/.pio-build-cache
     steps:
       - uses: actions/checkout@v4
 
@@ -69,7 +84,8 @@ jobs:
           path: |
             ~/.platformio
             ~/.cache/pip
-          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+            .pio-build-cache
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}-${{ env.PIO_CACHE_SCOPE }}
 
       - name: Install PlatformIO
         run: pip install --upgrade platformio
@@ -93,7 +109,7 @@ jobs:
         run: |
           set +e
           FAILED=""
-          for env in smalltv smalltv_loader smalltv_esp32 smalltv_esp32_8mb smalltv_c2; do
+          for env in $TARGETS; do
             echo "::group::pio run -e $env"
             pio run -e "$env"
             rc=$?

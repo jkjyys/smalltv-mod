@@ -1,9 +1,10 @@
 name: build-fast (smalltv only)
 
-# Manual-only: for quick iteration on the SmallTV-Ultra (ESP8266) target
-# while testing changes, without waiting on the other four targets that
-# the main "build" workflow always builds together. Trigger it from the
-# Actions tab: build-fast (smalltv only) -> Run workflow.
+# Manual-only: builds the SmallTV-Ultra (ESP8266) target as a downloadable
+# artifact, without tagging or releasing anything. (The main "build" workflow
+# now also builds only this target on a push to main, and all five targets
+# when run by hand.) Trigger it from the Actions tab:
+# build-fast (smalltv only) -> Run workflow.
 on:
   workflow_dispatch:
 
