@@ -17,6 +17,12 @@
 // the parsers out of line means only the parser actually running holds stack,
 // on top of a much smaller fetchUrl(); and the HTTPClient (~150 bytes) now
 // lives on the heap for the duration of one request instead of the stack.
+// v2.9.37 went one step further after the next ELF showed parseYahoo() itself
+// at 640 bytes (parseCashQuote 608, parseCashChart 800): ArduinoJson's chained
+// filter["a"]["b"][0]... proxies nest by value and GCC kept them all in the
+// frame the recursive parse then sits on. Building the filter and reading the
+// result now happen in their own out-of-line helpers, before and after the
+// parse, so none of that is on the stack while it recurses.
 #define STACK_LEAN __attribute__((noinline))
 
 // ---------------------------------------------------------------------------
@@ -374,10 +380,10 @@ static STACK_LEAN bool parseWebhook(const Settings& s, StockData& d, Stream& str
 }
 
 // ---- parse: Yahoo Finance chart payload -----------------------------------
-static STACK_LEAN bool parseYahoo(const Settings& s, StockData& d, Stream& stream) {
-  // Keep only the handful of fields we need; the full payload is large and the
-  // `meta` object alone has many nested members we don't care about.
-  JsonDocument filter;
+// Filter and result handling live in their own out-of-line helpers so the
+// ArduinoJson proxy temporaries they need never share the stack with the
+// recursive parse below (see STACK_LEAN at the top of this file).
+static STACK_LEAN void yahooFilter(JsonDocument& filter) {
   JsonObject fmeta = filter["chart"]["result"][0]["meta"].to<JsonObject>();
   fmeta["regularMarketPrice"] = true;
   fmeta["chartPreviousClose"] = true;
@@ -387,12 +393,9 @@ static STACK_LEAN bool parseYahoo(const Settings& s, StockData& d, Stream& strea
   fmeta["longName"]           = true;
   fmeta["regularMarketTime"]     = true;   // Unix seconds of the last regular-session price — used for the holiday check below
   filter["chart"]["result"][0]["indicators"]["quote"][0]["close"] = true;
+}
 
-  JsonDocument doc;
-  DeserializationError err = deserializeJson(
-      doc, stream, DeserializationOption::Filter(filter));
-  if (err) return false;
-
+static STACK_LEAN bool yahooApply(const Settings& s, StockData& d, JsonDocument& doc) {
   JsonObjectConst res  = doc["chart"]["result"][0];
   JsonObjectConst meta = res["meta"];
   if (meta.isNull()) return false;                 // bad symbol => result null
@@ -478,12 +481,27 @@ static STACK_LEAN bool parseYahoo(const Settings& s, StockData& d, Stream& strea
   return true;
 }
 
+static STACK_LEAN bool parseYahoo(const Settings& s, StockData& d, Stream& stream) {
+  // Keep only the handful of fields we need; the full payload is large and the
+  // `meta` object alone has many nested members we don't care about.
+  JsonDocument filter;
+  yahooFilter(filter);
+
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(
+      doc, stream, DeserializationOption::Filter(filter));
+  if (err) return false;
+  return yahooApply(s, d, doc);
+}
+
 // ---- parse: cash.ch quote ---------------------------------------------------
 // {"data":{"quoteList":{"quoteList":{"edges":[{"node":{"lval":"1086.51",
 //  "iNetVperprV":"7.36","perfPercentage":"0.68","mCur":"USD",...}}]}}}}
 // Numeric fields arrive as JSON *strings*, so read them as text and atof().
-static STACK_LEAN bool parseCashQuote(const Settings& s, StockData& d, Stream& stream) {
-  JsonDocument filter;
+// Filter and result handling live in their own out-of-line helpers so the
+// ArduinoJson proxy temporaries they need never share the stack with the
+// recursive parse below (see STACK_LEAN at the top of this file).
+static STACK_LEAN void cashQuoteFilter(JsonDocument& filter) {
   JsonObject node =
       filter["data"]["quoteList"]["quoteList"]["edges"][0]["node"].to<JsonObject>();
   node["lval"]           = true;   // last value (price)
@@ -491,12 +509,9 @@ static STACK_LEAN bool parseCashQuote(const Settings& s, StockData& d, Stream& s
   node["perfPercentage"] = true;   // day change in %
   node["mCur"]           = true;
   node["mShortName"]     = true;
+}
 
-  JsonDocument doc;
-  DeserializationError err = deserializeJson(
-      doc, stream, DeserializationOption::Filter(filter));
-  if (err) return false;
-
+static STACK_LEAN bool cashQuoteApply(const Settings& s, StockData& d, JsonDocument& doc) {
   JsonObjectConst n = doc["data"]["quoteList"]["quoteList"]["edges"][0]["node"];
   const char* lval = n["lval"] | "";       // empty => unknown key / no fix yet
   if (!lval[0]) return false;
@@ -531,6 +546,17 @@ static STACK_LEAN bool parseCashQuote(const Settings& s, StockData& d, Stream& s
   d.error = false;
   d.lastOkMs = millis();
   return true;
+}
+
+static STACK_LEAN bool parseCashQuote(const Settings& s, StockData& d, Stream& stream) {
+  JsonDocument filter;
+  cashQuoteFilter(filter);
+
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(
+      doc, stream, DeserializationOption::Filter(filter));
+  if (err) return false;
+  return cashQuoteApply(s, d, doc);
 }
 
 // ---- parse: Finnhub quote endpoint ------------------------------------------
@@ -648,15 +674,14 @@ static STACK_LEAN bool parseBinanceKlines(StockData& d, Stream& stream) {
 // {"data":{"integration":{"solid":{"chart":{"timeserie":{"prices":
 //  [{"close":998.45},...]}}}}}} — closes are real JSON numbers here (unlike
 // the quote), oldest -> newest. Downsampling mirrors the Yahoo parser.
-static STACK_LEAN bool parseCashChart(const Settings& s, StockData& d, Stream& stream) {
-  JsonDocument filter;
+// Filter and result handling live in their own out-of-line helpers so the
+// ArduinoJson proxy temporaries they need never share the stack with the
+// recursive parse below (see STACK_LEAN at the top of this file).
+static STACK_LEAN void cashChartFilter(JsonDocument& filter) {
   filter["data"]["integration"]["solid"]["chart"]["timeserie"]["prices"][0]["close"] = true;
+}
 
-  JsonDocument doc;
-  DeserializationError err = deserializeJson(
-      doc, stream, DeserializationOption::Filter(filter));
-  if (err) return false;
-
+static STACK_LEAN bool cashChartApply(const Settings& s, StockData& d, JsonDocument& doc) {
   JsonArrayConst prices =
       doc["data"]["integration"]["solid"]["chart"]["timeserie"]["prices"];
   if (prices.isNull()) return false;         // unknown key / empty series
@@ -692,6 +717,17 @@ static STACK_LEAN bool parseCashChart(const Settings& s, StockData& d, Stream& s
     if (d.sparkCount > 0) d.spark[d.sparkCount - 1] = last;  // pin newest
   }
   return true;
+}
+
+static STACK_LEAN bool parseCashChart(const Settings& s, StockData& d, Stream& stream) {
+  JsonDocument filter;
+  cashChartFilter(filter);
+
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(
+      doc, stream, DeserializationOption::Filter(filter));
+  if (err) return false;
+  return cashChartApply(s, d, doc);
 }
 
 // ---- one HTTP(S) GET + parse ----------------------------------------------
