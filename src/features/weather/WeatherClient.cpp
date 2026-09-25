@@ -2,6 +2,13 @@
 #include "Platform.h"
 #include "config.h"
 #include <ArduinoJson.h>
+#include <memory>
+#include <new>
+
+// Same stack diet as StockClient.cpp (see STACK_LEAN there): parsers out of
+// line, HTTPClient on the heap, so a weather fetch doesn't stack every
+// parser's JsonDocuments on the 4 KB loop stack at once.
+#define STACK_LEAN __attribute__((noinline))
 
 static WeatherNow g_w = {};
 static uint32_t   g_nextPollMs = 0;
@@ -73,7 +80,7 @@ static String buildOwmUrl(const Settings& s) {
 // Takes the whole body as a String (rather than streaming) so that, on an
 // unexpected shape, we can put a snippet of what the server actually sent
 // into g_parseErr instead of just "not what we expected".
-static bool parseOpenMeteo(const String& body) {
+static STACK_LEAN bool parseOpenMeteo(const String& body) {
   JsonDocument filter;
   JsonObject cur = filter["current"].to<JsonObject>();
   cur["temperature_2m"] = true;
@@ -141,7 +148,7 @@ static int16_t owmCodeToWmo(int owmId) {
 // forecast for the day the way Open-Meteo's `daily` block is; shown in the
 // same H/L slot regardless, since neither is exposed as a true forecast high/
 // low without a second (paid-tier) OWM call.
-static bool parseOwm(const String& body) {
+static STACK_LEAN bool parseOwm(const String& body) {
   JsonDocument filter;
   JsonObject w0 = filter["weather"].add<JsonObject>();
   w0["id"] = true;
@@ -198,7 +205,9 @@ static bool fetchOnce(const Settings& s) {
 
   std::unique_ptr<NetClient> client(platformMakeSecureClient(rx));
 
-  HTTPClient http;
+  std::unique_ptr<HTTPClient> httpOwner(new (std::nothrow) HTTPClient());   // heap, not stack
+  if (!httpOwner) { g_w.lastCode = -1001; return false; }
+  HTTPClient& http = *httpOwner;
   http.setTimeout(s.httpTimeout);
   http.setReuse(false);
   String url = owm ? buildOwmUrl(s) : buildOpenMeteoUrl(s);
