@@ -151,8 +151,9 @@ jobs:
           name: smalltv-mod-firmware
           path: dist/
 
-      # Unstripped .elf per target, kept OUT of dist/ (and so out of the public
-      # release) — it's only for turning a future crash's "epc 0x... addr 0x..."
+      # Unstripped .elf per target, kept OUT of dist/ (the SmallTV-Ultra one is
+      # attached to the release separately, see "Attach to release" below) —
+      # it's for turning a future crash's "epc 0x... addr 0x..."
       # (see main.cpp's g_safeMode / gfxCrash path, surfaced on /api/status) back
       # into a source file+line with addr2line, e.g.:
       #   xtensa-lx106-elf-addr2line -e smalltv-mod-firmware.elf -f -C -a 0x4000df64
@@ -190,5 +191,13 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.bump.outputs.tag }}
-          files: dist/*
+          # The SmallTV-Ultra image's unstripped .elf rides along too (the
+          # other targets' stay in the debug-symbols artifact above): it is
+          # what turns the crash addresses the device now logs (/api/status
+          # "crashes", see src/CrashTrace.h) back into source lines, and a
+          # release asset can be fetched without a GitHub login. The source is
+          # public anyway, and this build bakes in no credentials.
+          files: |
+            dist/*
+            dist-debug/smalltv-mod-firmware.elf
           generate_release_notes: true
