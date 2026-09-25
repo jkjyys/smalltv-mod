@@ -207,7 +207,11 @@ String otaUpdateFromGitHub(const Settings& s) {
 // already on the device. Verifying a fix for real means flashing it manually
 // (System tab) and then letting THAT build update itself to a later release.
 // v2.9.22, v2.9.24, v2.9.26, v2.9.28 and v2.9.30 all went through exactly
-// that; v2.9.31 has to as well.
+// that, and so did v2.9.31: v2.9.30's own attempt to install it (Update now)
+// died on the soft watchdog ~15 s into the boot, same as v2.9.28's -- so the
+// null-stream fix alone never touched the watchdog -- and v2.9.31 was then
+// flashed manually and booted cleanly. v2.9.32 is a docs-only release whose
+// only job is to be installed BY v2.9.31's updater.
 
 // ---- automatic-update loop guard (all targets) ------------------------------
 // "<tag> <count>\n" for the most recent release the automatic checker tried to
