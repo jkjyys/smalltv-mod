@@ -3,6 +3,9 @@
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 #include "config.h"
+#include "Gfx.h"
+#include <memory>
+#include <new>
 
 #if defined(SMALLTV_ESP32C2) || defined(SMALLTV_ESP32)
 #include <HTTPUpdate.h>
@@ -169,101 +172,166 @@ String otaUpdateFromGitHub(const Settings& s) {
 }
 
 // ---- update-at-boot (ESP8266) ----------------------------------------------
-// Both attempts below go through github.com's own redirect
-// (HTTPC_FORCE_FOLLOW_REDIRECTS -- HTTPClient follows the 3xx to the real,
-// signed CDN URL itself) and differ only in RX buffer size. That's new as of
-// v2.9.22: an earlier design hand-resolved the redirect first (its own GET
-// to github.com, chased by hand) and then MFLN-probed the resolved CDN host
-// directly, so the small-buffer attempt connected straight to that
-// pre-resolved URL. On a live device that hand-resolved attempt failed the
-// same way -- "Stream Read Timeout" or "connection lost", never a heap or
-// buffer-size complaint -- six times running, surviving three different
-// fixes in turn (verifying the negotiated size, retrying same-URL, even
-// re-resolving a fresh URL immediately before each retry). Six identical
-// failures across four different theories point at the one thing all of
-// them shared and none of them tested: connecting directly to a pre-resolved
-// CDN URL, bypassing github.com's own redirect entirely. v2.9.22 stopped
-// doing that and let ESPhttpUpdate/HTTPClient chase the redirect itself for
-// BOTH attempts, the same as the always-worked 16 KB path always has.
+// The web UI (the Update now button, or the automatic checker) queues the
+// request in LittleFS and reboots; otaBootUpdate() runs early in setup(),
+// before the features claim the heap, and reboots again into the new image
+// on success. The request is consumed BEFORE the attempt, so a crash or
+// failure can never boot-loop by itself -- but see OtaUpdate.h for the
+// automatic checker's loop guard, which that alone turned out not to cover.
 //
-// v2.9.24 (deferred mDNS/SNTP, see main.cpp) tested that heap theory on top
-// of the v2.9.22 fix and, over two live runs, found: the 16 KB attempt's
-// heap precheck still never passed (11640-14328 B largest block seen, never
-// the 17408 B needed -- deferring mDNS/SNTP didn't move that number, so
-// something else pins the heap that low the moment STA WiFi is up) -- AND,
-// more importantly, the 4 KB attempt's heap precheck had *never once*
-// failed, in any test, this whole session. The 4 KB path was never
-// heap-blocked; freeing heap could never have fixed it. Its real failure
-// both times was still a live-connection fault ("connection lost" once,
-// "Update error: ERROR[6]" / Stream Read Timeout the other) *during the
-// download itself*, after headers were already exchanged -- the same two
-// symptoms v2.9.22's fix was tested against, just with the hand-resolution
-// bug gone. That points at the one thing v2.9.22 removed along with the
-// hand-resolution: v2.9.21 and earlier MFLN-probed the resolved CDN host
-// directly before connecting to it, so the buffer size and the server's
-// actual TLS record size were confirmed to match. v2.9.22 onward stopped
-// resolving the CDN host at all (on purpose, to stop connecting to it
-// directly) but never replaced that probe -- it just guesses 4096 blind.
-// BearSSL's own setBufferSizes() doesn't negotiate anything by itself; if
-// the CDN host doesn't honor a 4096-byte MFLN request, the server is free to
-// send full-size (~16 KB) records the 4096+overhead buffer can't hold, and
-// that surfaces later, mid-download, as exactly this kind of stall/drop --
-// not as an obvious "buffer too small" error. otaResolveRedirect()/
-// otaUrlHost() below restore the probe (learning the CDN host, then probing
-// *it*, not github.com) without restoring the bug: it's a separate,
-// short-lived connection that's fully closed before the small/large
-// attempts, which still go through ESPhttpUpdate's own
-// HTTPC_FORCE_FOLLOW_REDIRECTS on the original github.com URL, exactly as
-// v2.9.22 established. If the CDN turns out not to honor MFLN at any size,
-// the 4 KB attempt is skipped outright (a mismatched small buffer is worse
-// than not trying it) and only the 16 KB attempt runs, gated on heap as
-// before -- and, confirmed live on v2.9.26 (see below), that CDN really
-// doesn't honor MFLN at all, so v2.9.28 adds a third, structurally
-// different attempt (otaDownloadRanged(), also below) that sidesteps the
-// whole MFLN/heap question via small HTTP Range requests instead of one
-// streamed response.
-//
-// The web UI queues the request in LittleFS and reboots; this runs early in
-// setup() with the heap still free. The request is consumed BEFORE the
-// attempt, so a crash or failure can never boot-loop.
+// How the download got here, in short (full reasoning next to each function
+// below):
+//  - Up to v2.9.27: one streamed ESPhttpUpdate download, trying a small
+//    (MFLN-probed) and a 16 KB TLS buffer. Live tests established that the
+//    release CDN honors no MFLN fragment size under 16 KB, and that this
+//    chip never frees the ~17 KB of contiguous heap the 16 KB buffer needs
+//    while WiFi is up. Both attempts are structurally doomed on this hardware;
+//    they remain only as a fallback.
+//  - v2.9.28: otaDownloadRanged() -- small HTTP Range requests, each of whose
+//    responses fits an 8 KB buffer. First live run crashed on a null stream
+//    pointer after a 206 (fixed in v2.9.30), and every automatic attempt after
+//    that died on the soft watchdog ~20 s into the boot, with no message.
+//  - The same live test exposed a bigger problem: after each failed attempt the
+//    device rebooted, the automatic checker fired again 5 minutes into the new
+//    boot, and the cycle repeated every ~5.5 minutes for ~2 days.
+//  - v2.9.31: the ranged download runs first, over static-RSA TLS (no
+//    elliptic-curve math in the handshake), in 4 KB chunks, checking every
+//    chunk's Content-Range and the whole image's MD5, refreshing an expired
+//    signed link and resuming stalled chunks; RTC-memory breadcrumbs report
+//    where an attempt died even when a reset killed it; and the automatic
+//    checker stops retrying a release it has already failed to install twice.
 //
 // Testing note: this code only ever runs as part of the CURRENTLY INSTALLED
-// firmware. As long as the automatic download keeps failing, the device
-// never advances, so every fix pushed here keeps getting "tested" by
-// re-running whatever fetch logic was already on the device -- not the new
-// code just pushed. Verifying a fix for real requires landing it on the
-// device first (manual upload, System tab) and then testing whether THAT
-// build can auto-update itself to a subsequent release. v2.9.22 hit exactly
-// this: the error strings the device kept reporting ("resolved (4096B)"/
-// "fallback (16384B)") were still v2.9.21's tags long after v2.9.22 was
-// pushed and its automatic OTA "succeeded" at nothing -- proof the fetch
-// code never actually changed until it was flashed manually. v2.9.24 hit
-// the same trap for the heap-fragmentation fix in main.cpp/Net.cpp (deferred
-// mDNS/SNTP past a queued update): it had to be flashed manually too, since
-// otherwise the OLD, already-installed fetch code -- with its own already-
-// fragmented heap -- would be the one "testing" it. v2.9.26 (this file's
-// MFLN-probe fix) hit it again identically, and was flashed manually and
-// confirmed booting fine; testing it against v2.9.27 (a docs-only bump)
-// gave the conclusive live result this comment opens with: the CDN honors
-// no MFLN size at all, and the 16 KB path's heap precheck still never
-// passes. v2.9.28 (otaDownloadRanged(), above) hit the same trap in turn:
-// flashed manually, booted fine (22048 B free heap, no crash) -- and this
-// time the device's own "check automatically" background timer, not a
-// manual click, found v2.9.29 as soon as it was published and fired the
-// real test on its own: it queued the update and rebooted into
-// otaDownloadRanged(), which crashed (Exception, epc/addr both pointing at
-// a null-pointer virtual call) a few minutes later, then recovered cleanly
-// to a normal boot on v2.9.28 -- the request-consumed-before-attempt design
-// meant to prevent a boot loop worked exactly as intended. Root cause:
-// stream->readBytes() ran against a null WiFiClient* from getStreamPtr(),
-// unchecked, apparently possible even after a 206 on the reused keep-alive
-// connection. Fixed by folding that null/empty check into the existing
-// per-chunk retry loop (see otaDownloadRanged() above) instead of trusting
-// a 206 status alone. v2.9.29 will need its own manual flash + one more
-// release to genuinely retest this against a live automatic trigger again.
+// firmware. As long as the automatic download keeps failing, the device never
+// advances, so a fix pushed here is only "tested" by whatever fetch code was
+// already on the device. Verifying a fix for real means flashing it manually
+// (System tab) and then letting THAT build update itself to a later release.
+// v2.9.22, v2.9.24, v2.9.26, v2.9.28 and v2.9.30 all went through exactly
+// that; v2.9.31 has to as well.
+
+// ---- automatic-update loop guard (all targets) ------------------------------
+// "<tag> <count>\n" for the most recent release the automatic checker tried to
+// install. A different tag starts the count over, so every new release gets
+// its own fresh tries. See OtaUpdate.h for why this exists.
+static const char* OTA_AUTO_PATH = "/ota.auto";
+
+static uint8_t otaAutoCount(const String& tag) {
+  File f = LittleFS.open(OTA_AUTO_PATH, "r");
+  if (!f) return 0;
+  String line = f.readStringUntil('\n');
+  f.close();
+  int sp = line.indexOf(' ');
+  if (sp <= 0 || line.substring(0, sp) != tag) return 0;
+  long n = line.substring(sp + 1).toInt();
+  return (uint8_t)(n < 0 ? 0 : (n > 255 ? 255 : n));
+}
+
+bool otaAutoAttemptAllowed(const String& tag) {
+  return otaAutoCount(tag) < OTA_AUTO_MAX_TRIES;
+}
+
+void otaNoteAutoAttempt(const String& tag) {
+  uint8_t n = otaAutoCount(tag);
+  File f = LittleFS.open(OTA_AUTO_PATH, "w");
+  if (!f) return;
+  f.print(tag);
+  f.print(' ');
+  f.print((unsigned)(n < 255 ? n + 1 : 255));
+  f.print('\n');
+  f.close();
+}
+
 #if defined(SMALLTV_ESP8266)
 static const char* OTA_REQ_PATH = "/ota.req";
 static const char* OTA_MSG_PATH = "/ota.msg";
+
+static void otaBootResult(const String& msg) {
+  File f = LittleFS.open(OTA_MSG_PATH, "w");
+  if (f) { f.print(msg); f.close(); }
+}
+
+// ---- progress breadcrumbs (RTC memory) --------------------------------------
+// A watchdog reset or an exception in the middle of the boot-time download
+// leaves no error message behind -- the code that would have written one
+// never runs -- and this device has no serial console. That is exactly how
+// v2.9.28's automatic update failed for ~2 days with nothing to show for it
+// but "Last reset: Software Watchdog", every few minutes, without ever saying
+// where. So otaBootUpdate() now drops a breadcrumb into RTC user memory at
+// every step. RTC memory survives watchdog and exception resets (not a power
+// cut, and power-on garbage is caught by the magic + check word), one write
+// is a few microseconds, and on the next boot otaReportInterrupted() turns it
+// into the "Last update:" line the System tab already shows. Blocks 0-31 of
+// RTC user memory hold eboot's command (the one that copies a freshly
+// downloaded image into place), so the breadcrumb sits well above them.
+static const uint32_t CRUMB_BLOCK = 96;            // 4-byte blocks; 96 = byte 384 of 512
+static const uint32_t CRUMB_MAGIC = 0x4F544332UL;  // "OTC2"
+static const uint32_t CRUMB_RSA   = 1;             // detail bit: static-RSA TLS was in use
+
+struct OtaCrumb { uint32_t magic, phase, offset, total, detail, check; };
+
+enum : uint32_t {
+  PH_NONE = 0,   // nothing in flight
+  PH_CHECK,      // asking the GitHub API for the latest release
+  PH_RESOLVE,    // asking github.com where the signed download link points
+  PH_HEAP,       // waiting for enough contiguous heap for the TLS buffers
+  PH_REQUEST,    // TLS connect + Range request for one chunk
+  PH_READ,       // reading one chunk's body into flash
+  PH_FINISH,     // Update.end(): MD5 + image header check
+  PH_LEGACY,     // the older single-stream ESPhttpUpdate attempts
+  PH_REBOOT,     // image written and verified; rebooting into it
+};
+
+static uint32_t crumbCheck(const OtaCrumb& c) {
+  return c.magic ^ c.phase ^ c.offset ^ c.total ^ c.detail ^ 0xA5A5A5A5UL;
+}
+
+static void crumb(uint32_t phase, uint32_t offset = 0, uint32_t total = 0, uint32_t detail = 0) {
+  OtaCrumb c = { CRUMB_MAGIC, phase, offset, total, detail, 0 };
+  c.check = crumbCheck(c);
+  ESP.rtcUserMemoryWrite(CRUMB_BLOCK, reinterpret_cast<uint32_t*>(&c), sizeof(c));
+}
+
+static const char* phaseText(uint32_t p) {
+  switch (p) {
+    case PH_CHECK:   return "checking GitHub for the latest release";
+    case PH_RESOLVE: return "looking up the download link";
+    case PH_HEAP:    return "waiting for free memory";
+    case PH_REQUEST: return "connecting/requesting a chunk";
+    case PH_READ:    return "downloading a chunk";
+    case PH_FINISH:  return "verifying the new image";
+    case PH_LEGACY:  return "trying the older single-stream download";
+    default:         return "updating";
+  }
+}
+
+void otaReportInterrupted(const char* resetReason) {
+  OtaCrumb c;
+  if (!ESP.rtcUserMemoryRead(CRUMB_BLOCK, reinterpret_cast<uint32_t*>(&c), sizeof(c))) return;
+  if (c.magic != CRUMB_MAGIC || c.check != crumbCheck(c)) return;   // never written / power-on noise
+  crumb(PH_NONE);                                                   // report each breadcrumb once
+  if (c.phase == PH_NONE) return;
+
+  char msg[200];
+  if (c.phase == PH_REBOOT) {
+    // offset carries verNum() of the firmware that did the download.
+    long from = (long)c.offset;
+    if (from == verNum(FW_VERSION)) {
+      snprintf(msg, sizeof(msg), "new image was written, but the device came back on " FW_VERSION
+               " (the copy into place did not take)");
+    } else {
+      snprintf(msg, sizeof(msg), "updated from %ld.%ld.%ld to " FW_VERSION,
+               from / 10000, (from / 100) % 100, from % 100);
+    }
+  } else if (c.total) {
+    snprintf(msg, sizeof(msg), "update cut off by a reset (%s) while %s, at byte %u of %u [%s TLS]",
+             resetReason, phaseText(c.phase), (unsigned)c.offset, (unsigned)c.total,
+             (c.detail & CRUMB_RSA) ? "rsa" : "ecdhe");
+  } else {
+    snprintf(msg, sizeof(msg), "update cut off by a reset (%s) while %s",
+             resetReason, phaseText(c.phase));
+  }
+  otaBootResult(msg);
+}
 
 // Pulls the "host[:port]" component out of an "https://host[:port]/path..."
 // URL. Used to get a bare hostname to hand to probeMaxFragmentLength()/
@@ -316,31 +384,97 @@ static String otaResolveRedirect(const String& url) {
   return loc;
 }
 
+// ---- Range-chunked download ------------------------------------------------
 // Downloads and flashes the firmware in small, HTTP Range-bounded chunks
-// over ONE reused HTTPS connection, instead of asking the server to hold to
-// a small TLS record size for one continuous streamed response. Directly
-// probing this CDN (see otaResolveRedirect/otaUrlHost above and the
-// file-level comment) confirmed it honors no MFLN fragment size under
-// 16384 bytes -- so it always frames a plain streamed response in
-// full-size (~16 KB) TLS records -- while this device has never once
-// freed more than ~14 KB of *contiguous* heap while WiFi is up, even with
-// mDNS/SNTP deferred past the download (v2.9.24). Those two numbers don't
-// meet: 16 KB records need a buffer this chip can't reliably clear. A
-// Range-bounded response can't legally arrive wrapped in a TLS record
-// bigger than the response itself, though, so keeping each request's
-// response small (RANGE_CHUNK bytes of body, comfortably under
-// RANGE_BUF's capacity once headers and TLS framing are accounted for)
-// sidesteps the ceiling entirely instead of trying to raise it further.
-// One TLS connection is opened and reused (HTTPClient's setReuse) across
-// every chunk: partly to avoid ~100 separate handshakes, partly because
-// reusing one already-allocated set of BearSSL buffers can't progressively
-// fragment the heap the way repeated per-chunk alloc/free cycles could.
-static const uint32_t RANGE_BUF   = 8192;  // TLS RX buffer; needs ~9216B contiguous --
-                                            // comfortably under the ~14 KB ceiling above
-static const uint32_t RANGE_CHUNK = 7168;  // body bytes/request; leaves ~1KB of RANGE_BUF
-                                            // for response headers + TLS record overhead
+// instead of asking the server to hold to a small TLS record size for one
+// continuous streamed response. Directly probing this CDN (see
+// otaResolveRedirect/otaUrlHost above and the file-level comment) confirmed
+// it honors no MFLN fragment size under 16384 bytes -- so it frames a plain
+// streamed response in full-size (~16 KB) TLS records -- while this device
+// has never once freed more than ~14 KB of *contiguous* heap while WiFi is
+// up. Those two numbers don't meet. A Range-bounded response can't arrive
+// wrapped in a TLS record bigger than the response itself, though, so keeping
+// each response small sidesteps that ceiling instead of trying to raise it.
+//
+// What v2.9.31 changed here, after v2.9.28's version (first to run live)
+// crashed once on a null stream and then died on the soft watchdog on every
+// automatic attempt afterwards:
+//  - Static-RSA TLS first. An SSL Labs scan of release-assets.githubusercontent.com
+//    shows an RSA-2048 certificate and exactly one non-ECDHE suite,
+//    TLS_RSA_WITH_AES_128_GCM_SHA256. Offering only that suite takes every
+//    bit of elliptic-curve math out of the handshake (the RSA public-key
+//    operation is a few ms), and a long, uninterruptible EC step inside a
+//    BearSSL handshake is the leading suspect for the watchdog: nothing in
+//    this download loop can yield while BearSSL computes. BearSSL's own
+//    setCiphersLessSecure() is no use here -- its list is CBC-only, and this
+//    CDN offers no RSA-CBC suite at all. If that connection fails outright,
+//    the rest of the download falls back to BearSSL's default list (what
+//    v2.9.28-v2.9.30 used).
+//  - 4 KB chunks, not 7 KB. Measured response headers run ~950 bytes; if the
+//    server packs headers and body into one TLS record, 7168 + ~950 bytes
+//    was within ~100 bytes of what an 8 KB BearSSL buffer can take (BearSSL
+//    needs ~325 bytes of it for record overhead). 4096 leaves ~3.7 KB spare.
+//  - Every chunk's Content-Range is checked against what was asked for before
+//    a byte of it reaches flash, and the whole image is checked against the
+//    CDN's own MD5 (x-ms-blob-content-md5, the Azure blob's stored hash --
+//    verified equal to the release file's MD5) in Update.end(). A wrong or
+//    shuffled chunk can never be committed as the new firmware.
+//  - Dead links and stalls are recoverable. The signed CDN link's token
+//    expires 5 minutes after it is issued, so a 4xx gets a fresh link from
+//    github.com and the same chunk is asked for again; a stream that stalls
+//    mid-chunk keeps what already reached flash, closes the connection (never
+//    reused with unread bytes in flight) and resumes from exactly that byte.
+//  - Progress on screen ("updating 40%") and in the RTC breadcrumb.
+static const uint32_t RANGE_BUF      = 8192;  // TLS RX buffer; needs ~9216B contiguous
+static const uint32_t RANGE_CHUNK    = 4096;  // body bytes per request (see above)
+static const uint8_t  RANGE_RESOLVES = 4;     // fresh-link lookups allowed per download
+static const uint8_t  RANGE_STALLS   = 8;     // mid-chunk stalls (resume points) allowed
 
-static bool otaDownloadRanged(const String& url, String& err) {
+static const uint16_t kRsaGcmOnly[] PROGMEM = { BR_TLS_RSA_WITH_AES_128_GCM_SHA256 };
+static const char* HDR_RANGE = "Content-Range";
+static const char* HDR_MD5   = "x-ms-blob-content-md5";
+
+// "bytes 4096-8191/697584" -> 4096, 8191, 697584
+static bool parseContentRange(const String& cr, uint32_t& start, uint32_t& end, uint32_t& total) {
+  unsigned long s = 0, e = 0, t = 0;
+  if (sscanf(cr.c_str(), "bytes %lu-%lu/%lu", &s, &e, &t) != 3) return false;
+  if (e < s || t <= e) return false;
+  start = (uint32_t)s; end = (uint32_t)e; total = (uint32_t)t;
+  return true;
+}
+
+// Base64 MD5 ("2GPYZC2+0hVbS6iiYsBCSQ==") -> 32 lowercase hex chars + NUL,
+// the form Update.setMD5() wants. False on anything that isn't exactly 16 bytes.
+static bool b64Md5ToHex(const String& b64, char out[33]) {
+  static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  uint8_t bin[16];
+  size_t n = 0;
+  uint32_t acc = 0;
+  int bits = 0;
+  for (size_t i = 0; i < b64.length(); i++) {
+    char ch = b64[i];
+    if (ch == '=') break;
+    const char* p = ch ? strchr(tbl, ch) : nullptr;
+    if (!p) return false;
+    acc = (acc << 6) | (uint32_t)(p - tbl);
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      if (n >= sizeof(bin)) return false;
+      bin[n++] = (uint8_t)(acc >> bits);
+    }
+  }
+  if (n != sizeof(bin)) return false;
+  for (size_t i = 0; i < sizeof(bin); i++) snprintf(out + i * 2, 3, "%02x", bin[i]);
+  return true;
+}
+
+static bool otaDownloadRanged(const String& ghUrl, String& err) {
+  crumb(PH_RESOLVE);
+  String url = otaResolveRedirect(ghUrl);
+  if (!url.length()) { err = F("couldn't look up the download link"); return false; }
+
+  crumb(PH_HEAP);
   const uint32_t need    = RANGE_BUF + 512 + 8000;
   const uint32_t needBlk = RANGE_BUF + 1024;
   for (int tries = 0; tries < 12; tries++) {
@@ -356,96 +490,165 @@ static bool otaDownloadRanged(const String& url, String& err) {
     return false;
   }
 
-  SecureClient client;
-  client.setInsecure();
-  client.setBufferSizes(RANGE_BUF, 512);
+  // Two client objects, never connected at the same time (the other one is
+  // always stopped first, so only one set of 8 KB buffers is ever allocated).
+  SecureClient rsaClient;                 // static RSA: no elliptic-curve math at all
+  rsaClient.setInsecure();
+  rsaClient.setBufferSizes(RANGE_BUF, 512);
+  rsaClient.setCiphers(kRsaGcmOnly, 1);
+  SecureClient fullClient;                // BearSSL's default list, as used up to v2.9.30
+  fullClient.setInsecure();
+  fullClient.setBufferSizes(RANGE_BUF, 512);
+  bool useRsa = true;
 
   HTTPClient http;
   http.setTimeout(15000);
-  http.setReuse(true);              // keep the TLS session alive across chunk requests
+  http.setReuse(true);                    // keep the connection across chunk requests
   http.setUserAgent(F(FW_NAME));
-  http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);  // this IS the resolved URL already
-  const char* hdrKeys[] = { "Content-Range" };
-  http.collectHeaders(hdrKeys, 1);
+  http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);   // this IS the resolved URL already
+  const char* hdrKeys[] = { HDR_RANGE, HDR_MD5 };
+  http.collectHeaders(hdrKeys, 2);
 
-  uint32_t total  = 0;     // learned from the first response's Content-Range
-  uint32_t offset = 0;
-  bool     began  = false; // Update.begin() has run
-  uint8_t  buf[512];
+  uint32_t total    = 0;       // learned from the first response's Content-Range
+  uint32_t offset   = 0;       // bytes already written to flash
+  bool     began    = false;   // Update.begin() has run
+  bool     md5Set   = false;
+  uint8_t  resolves = 0;
+  uint8_t  stalls   = 0;
+  int      shownPct = -10;
+  // Read buffer on the heap, not the 4 KB cont stack: /api/status has shown
+  // that stack's high-water mark within ~64 bytes of full in normal running.
+  const size_t kBufLen = 512;
+  std::unique_ptr<uint8_t[]> buf(new (std::nothrow) uint8_t[kBufLen]);
+  if (!buf) { err = F("out of memory for the read buffer"); return false; }
+
+  auto dropConnection = [&]() {   // never reuse a connection that may have bytes in flight
+    http.end();
+    rsaClient.stop();
+    fullClient.stop();
+  };
+  auto abortWith = [&](const String& why) {
+    err = why;
+    dropConnection();
+    if (began) Update.end(false);
+    return false;
+  };
 
   while (!began || offset < total) {
-    uint32_t last = began ? (((offset + RANGE_CHUNK < total) ? offset + RANGE_CHUNK : total) - 1)
-                           : (offset + RANGE_CHUNK - 1);
-    char rangeHdr[48];
+    uint32_t want = began ? ((total - offset < RANGE_CHUNK) ? total - offset : RANGE_CHUNK)
+                          : RANGE_CHUNK;
+    uint32_t last = offset + want - 1;
+    char rangeHdr[40];
     snprintf(rangeHdr, sizeof(rangeHdr), "bytes=%u-%u", (unsigned)offset, (unsigned)last);
 
-    // Retries a fresh begin()/GET() not just on a non-206 status, but also when
-    // the response looked fine (206) yet getStreamPtr() came back null or the
-    // body was reported empty -- a live device just hit exactly this on the
-    // reused connection (see the big comment above this function): a crash
-    // with epc/addr both pointing at a null-pointer virtual call, from
-    // stream->readBytes() below running against a null stream. A CDN response
-    // can apparently claim 206 on a reused keep-alive connection without a
-    // stream actually being ready every time; retrying with a brand new
-    // connection (a fresh http.begin(), not just re-reading the old one) is
-    // the same recovery already used for the small/large attempts' "connection
-    // lost" retries above, just applied at the chunk level here.
+    // Up to three tries per chunk. A 206 only counts once getStreamPtr() is
+    // non-null and the body is non-empty -- v2.9.28 crashed trusting the
+    // status alone (a null stream after a 206 on a reused connection).
     int code = -1;
     int chunkLen = 0;
     WiFiClient* stream = nullptr;
-    for (uint8_t retry = 0; retry < 3; retry++) {
-      if (retry) delay(300);
-      if (!http.begin(client, url)) continue;
+    for (uint8_t attempt = 0; attempt < 3; attempt++) {
+      if (attempt) delay(300);
+      crumb(PH_REQUEST, offset, total, useRsa ? CRUMB_RSA : 0);
+      if (!http.begin(useRsa ? static_cast<WiFiClient&>(rsaClient) : static_cast<WiFiClient&>(fullClient), url)) {
+        code = -1;
+        continue;
+      }
       http.addHeader("Range", rangeHdr);
       code = http.GET();
       if (code == 206) {
         chunkLen = http.getSize();
-        if (chunkLen < 0) chunkLen = 0;
         stream = http.getStreamPtr();
-        if (stream && chunkLen > 0) break;   // a response we can actually read
+        if (stream && chunkLen > 0) break;
+        stream = nullptr;
       }
-      http.end();
-      code = -1;
-      stream = nullptr;
+      dropConnection();
+      if (code == HTTPC_ERROR_CONNECTION_FAILED && useRsa && !began) {
+        useRsa = false;    // static-RSA offer refused (or connect failed): default suites from here on
+      }
+      if (code >= 400 && code < 500) break;   // link rejected/expired: the same URL won't do better
     }
-    if (code != 206 || !stream) {
-      err = "range GET failed at offset " + String(offset) +
-            (code == -1 ? String(" (no usable response after retries)") : (": HTTP " + String(code)));
-      if (began) Update.end(false);
-      return false;
+
+    if (!stream) {
+      if (resolves < RANGE_RESOLVES) {
+        // A fresh signed link from github.com (the old one's token may simply
+        // have expired), then the same chunk again on a brand-new connection.
+        resolves++;
+        dropConnection();
+        crumb(PH_RESOLVE, offset, total, useRsa ? CRUMB_RSA : 0);
+        String fresh = otaResolveRedirect(ghUrl);
+        if (fresh.length()) { url = fresh; continue; }
+      }
+      char msg[120];
+      snprintf(msg, sizeof(msg), "no usable response for %s (last code %d, %s TLS, %u link refreshes)",
+               rangeHdr, code, useRsa ? "rsa" : "ecdhe", (unsigned)resolves);
+      return abortWith(msg);
+    }
+
+    // Only the exact bytes asked for may go near flash.
+    uint32_t cs = 0, ce = 0, ct = 0;
+    String cr = http.header(HDR_RANGE);
+    if (!parseContentRange(cr, cs, ce, ct) || cs != offset ||
+        (ce - cs + 1) != (uint32_t)chunkLen || (began && ct != total)) {
+      return abortWith("unexpected Content-Range '" + cr + "' (asked for " + rangeHdr +
+                       ", length " + String(chunkLen) + ")");
     }
 
     if (!began) {
-      String cr = http.header("Content-Range");           // "bytes 0-7167/695504"
-      int slash = cr.lastIndexOf('/');
-      total = (slash >= 0) ? (uint32_t)cr.substring(slash + 1).toInt() : 0;
-      if (!total || !Update.begin(total)) {
-        err = !total ? "no Content-Range in response" : "Update.begin failed";
-        http.end();
-        return false;
+      total = ct;
+      if (!Update.begin(total)) {
+        return abortWith("Update.begin(" + String(total) + ") failed: " + Update.getErrorString());
       }
       began = true;
+      char md5hex[33];
+      md5Set = b64Md5ToHex(http.header(HDR_MD5), md5hex) && Update.setMD5(md5hex);
     }
 
-    int remaining = chunkLen;
-    bool chunkOk = true;
-    while (remaining > 0) {
-      int toRead = (remaining < (int)sizeof(buf)) ? remaining : (int)sizeof(buf);
-      int got = stream->readBytes(buf, toRead);
-      if (got <= 0 || Update.write(buf, got) != (size_t)got) { chunkOk = false; break; }
-      remaining -= got;
+    crumb(PH_READ, offset, total, useRsa ? CRUMB_RSA : 0);
+    uint32_t written = 0;
+    bool flashErr = false;
+    while (written < (uint32_t)chunkLen) {
+      size_t toRead = ((uint32_t)chunkLen - written < kBufLen) ? (size_t)((uint32_t)chunkLen - written)
+                                                               : kBufLen;
+      int got = (int)stream->readBytes(buf.get(), toRead);
+      if (got <= 0) break;                                   // stalled/dropped: resume below
+      if (Update.write(buf.get(), (size_t)got) != (size_t)got) { flashErr = true; break; }
+      written += (uint32_t)got;
     }
-    http.end();
-    if (!chunkOk) {
-      err = "stream read failed at offset " + String(offset);
-      Update.end(false);
-      return false;
+    offset += written;
+
+    if (flashErr) {
+      return abortWith("flash write failed at byte " + String(offset) + ": " + Update.getErrorString());
     }
-    offset += (uint32_t)chunkLen;
+    if (written < (uint32_t)chunkLen) {
+      // Whatever arrived is already in flash; carry on from exactly there on a
+      // fresh connection rather than reusing one with unread bytes in flight.
+      if (++stalls > RANGE_STALLS) {
+        char msg[100];
+        snprintf(msg, sizeof(msg), "stream kept stalling (%u times), last at byte %u of %u",
+                 (unsigned)stalls, (unsigned)offset, (unsigned)total);
+        return abortWith(msg);
+      }
+      dropConnection();
+      continue;
+    }
+    http.end();   // whole body read: the connection is clean and stays open for the next chunk
+
+    int pct = (int)((uint64_t)offset * 100 / total);
+    if (pct / 10 != shownPct / 10) {
+      shownPct = pct;
+      char line[20];
+      snprintf(line, sizeof(line), "updating %d%%", pct);
+      gfxBoot("SmallTV", line);
+    }
+    yield();
   }
+  dropConnection();
 
-  if (!Update.end(true) || !Update.isFinished()) {
-    err = "Update.end failed, code " + String(Update.getError());
+  crumb(PH_FINISH, offset, total, useRsa ? CRUMB_RSA : 0);
+  if (!Update.end()) {   // strict: every byte written, MD5 (when the CDN sent one) must match
+    err = String("image check failed") + (md5Set ? " (MD5 checked)" : " (no MD5 from CDN)") +
+          ": " + Update.getErrorString();
     return false;
   }
   return true;   // caller reboots
@@ -461,11 +664,6 @@ bool otaRequestBootUpdate(const char* tag) {
   return true;
 }
 
-static void otaBootResult(const String& msg) {
-  File f = LittleFS.open(OTA_MSG_PATH, "w");
-  if (f) { f.print(msg); f.close(); }
-}
-
 String otaTakeBootResult() {
   if (!LittleFS.exists(OTA_MSG_PATH)) return String();
   File f = LittleFS.open(OTA_MSG_PATH, "r");
@@ -479,69 +677,15 @@ void otaBootUpdate(const Settings& s) {
   LittleFS.remove(OTA_REQ_PATH);            // consume first: one attempt per request
   if (WiFi.status() != WL_CONNECTED) { otaBootResult(F("no WiFi at boot")); return; }
 
+  crumb(PH_CHECK);
   OtaLatest r = otaCheckLatest(s);          // re-resolve the asset URL fresh
-  if (!r.ok)    { otaBootResult("check failed: " + r.error); return; }
-  if (!r.newer) { otaBootResult(F("already up to date (" FW_VERSION ")")); return; }
+  if (!r.ok)    { crumb(PH_NONE); otaBootResult("check failed: " + r.error); return; }
+  if (!r.newer) { crumb(PH_NONE); otaBootResult(F("already up to date (" FW_VERSION ")")); return; }
 
-  ESPhttpUpdate.rebootOnUpdate(true);
-
-  // Probe the CDN's actual MFLN support before picking the small attempt's
-  // buffer size (see the file-level comment above for the full reasoning: a
-  // guessed size the CDN doesn't honor is indistinguishable, until well into
-  // the download, from the "connection lost" / Stream Read Timeout failures
-  // this file has been chasing all session). This resolve is a separate,
-  // already-closed connection by this point -- the small/large attempts
-  // below are unaffected and still go through ESPhttpUpdate's own redirect
-  // handling on the original r.url.
-  String cdnHost = otaUrlHost(otaResolveRedirect(r.url));
-  uint16_t smallBuf = 4096;              // pre-v2.9.26 fallback if the lookup above failed
-  bool     haveMfln = false;
-  if (cdnHost.length()) {
-    smallBuf = probeMfln(cdnHost.c_str());
-    haveMfln = smallBuf < 16384;         // probeMfln returns 16384 itself when nothing smaller matched
-  }
-
-  // Both attempts below let ESPhttpUpdate/HTTPClient chase github.com's own
-  // redirect to the real, signed CDN URL (see the file-level comment above
-  // for why: six straight live failures on a hand-resolved direct-to-CDN
-  // connection, across four falsified theories, pointed at that hand
-  // resolution itself rather than at buffer size, heap, retries, or URL
-  // freshness). "small" (now MFLN-probed, not guessed) runs first, since
-  // this device's heap is fragmented enough that the largest contiguous
-  // block has never once reached the 16 KB path's requirement in testing;
-  // it's skipped outright when the CDN host was confirmed to support no
-  // fragment size smaller than 16 KB, since a mismatched small buffer is
-  // worse than not trying it. "large" always runs last, unconditionally, as
-  // the original proven size in case a less-fragmented boot allows it.
-  // Either way this can only let a tight-heap or MFLN-mismatched device
-  // through that used to fail outright — never make a working device worse.
-  struct OtaAttempt { uint32_t rxBuf; const char* tag; };
-  OtaAttempt attempts[2];
-  uint8_t n = 0;
-  if (haveMfln || cdnHost.length() == 0) {
-    attempts[n++] = { smallBuf, haveMfln ? "small(mfln)" : "small" };
-  }
-  attempts[n++] = { 16384, "large" };
-
-  // Every attempt's outcome, not just the last one — otherwise the "large"
-  // attempt's heap-check failure (which needs the biggest contiguous block
-  // of the two, so it's the one most likely to fail) silently overwrites
-  // whatever the "small" attempt actually hit, and a boot-only report with
-  // no serial console has no other way to see that.
-  //
-  // Built with snprintf into a fixed stack buffer, NOT chained Arduino
-  // String concatenation (`a + b + c + ...`). This function's very first
-  // caller of `record()` below can be the "not enough heap" branch — i.e.
-  // every one of these messages can be built at the exact moment the heap
-  // has just been found critically low/fragmented. Each `+` on a String
-  // allocates a new heap block for its temporary result; chaining several
-  // of them (as this used to) right when allocation is already failing
-  // risks the allocator itself, not just this diagnostic, and a device that
-  // was already landing in this exact low-heap branch (see the "not enough
-  // heap even at boot" reports this was added to explain) is exactly where
-  // that risk stops being theoretical. snprintf only ever writes into a
-  // buffer that's already on the stack, so it can't fail the same way.
-  char errs[420] = {0};   // 3 possible entries now (small/large/ranged) -- was 300 for 2
+  // Every attempt's outcome, not just the last one, built with snprintf into
+  // a fixed stack buffer rather than chained String concatenation: these
+  // messages can be built at the exact moment the heap is critically low.
+  char errs[420] = {0};
   size_t errsLen = 0;
   auto record = [&errs, &errsLen](const char* tag, uint32_t rxBuf, const char* err) {
     int avail = (int)sizeof(errs) - (int)errsLen;
@@ -550,29 +694,55 @@ void otaBootUpdate(const Settings& s) {
                       errsLen ? "; " : "", tag, (unsigned)rxBuf, err);
     if (n > 0) errsLen += (n < avail - 1) ? (size_t)n : (size_t)(avail - 1);
   };
-  // Record the skip itself when it happens — otherwise a report with only a
-  // "large" entry looks identical to a boot where the small attempt was
-  // never coded at all, and the whole point of probing first is to know
-  // *why* it didn't run.
-  if (cdnHost.length() && !haveMfln) {
+
+  // 1) The Range-chunked download: the only approach that fits this chip's
+  //    heap against this CDN (see otaDownloadRanged() above). It runs first,
+  //    on the freshest heap this boot will have.
+  {
+    String rangedErr;
+    if (otaDownloadRanged(r.url, rangedErr)) {
+      crumb(PH_REBOOT, (uint32_t)verNum(FW_VERSION));
+      ESP.restart();
+      return;          // never reached
+    }
+    record("ranged", RANGE_BUF, rangedErr.c_str());
+  }
+
+  // 2) Fallback: the older single-stream attempts, unchanged in substance.
+  //    Both let ESPhttpUpdate/HTTPClient chase github.com's own redirect to
+  //    the signed CDN URL itself, and differ only in RX buffer size. "small"
+  //    is MFLN-probed against the CDN host and skipped when that host honors
+  //    no fragment size under 16 KB (which, as of v2.9.26's live test, it
+  //    doesn't); "large" needs more contiguous heap than this device has ever
+  //    freed. Neither has succeeded on this hardware -- they stay only because
+  //    trying them costs a few seconds of a boot that is failing anyway.
+  crumb(PH_LEGACY);
+  ESPhttpUpdate.rebootOnUpdate(false);      // reboot below, after the breadcrumb
+  String cdnHost = otaUrlHost(otaResolveRedirect(r.url));
+  uint16_t smallBuf = 4096;                 // pre-v2.9.26 fallback if the lookup above failed
+  bool     haveMfln = false;
+  if (cdnHost.length()) {
+    smallBuf = probeMfln(cdnHost.c_str());
+    haveMfln = smallBuf < 16384;            // probeMfln returns 16384 itself when nothing smaller matched
+  }
+
+  struct OtaAttempt { uint32_t rxBuf; const char* tag; };
+  OtaAttempt attempts[2];
+  uint8_t n = 0;
+  if (haveMfln || cdnHost.length() == 0) {
+    attempts[n++] = { smallBuf, haveMfln ? "small(mfln)" : "small" };
+  } else {
     record("small", 0, "skipped: CDN honors no MFLN size <16384 (checked 512/1024/4096)");
   }
+  attempts[n++] = { 16384, "large" };
+
   for (uint8_t i = 0; i < n; i++) {
     uint32_t rxBuf = attempts[i].rxBuf;
-    // rx + tx buffers plus BearSSL engine/stack-thunk overhead.
+    // rx + tx buffers plus BearSSL engine/stack-thunk overhead; total free can
+    // clear this while no single block is big enough, so wait briefly (the
+    // delay()s service WiFi/lwIP and let freed blocks coalesce) before giving up.
     const uint32_t need    = rxBuf + 512 + 8000;
     const uint32_t needBlk = rxBuf + 1024;
-    // Total free heap can clear `need` while the heap is fragmented enough
-    // that no single block is big enough — WiFi association and the check
-    // above's own HTTPS request(s) each leave short-lived allocations behind.
-    // A few delay()s (which service the WiFi/lwIP stack) give those a moment
-    // to be freed and the allocator a moment to coalesce; cheap, and it's one
-    // throwaway boot attempt either way if it doesn't help. Was 5*200ms —
-    // widened to 12*250ms (3s worst case) since the observed failures were
-    // sitting close to the line (largest block a few KB short of `needBlk`),
-    // the kind of gap a little more coalescing time plausibly closes, and
-    // 3s once at boot, only when already about to fail outright, costs
-    // nothing on the normal/no-update-pending path.
     for (int tries = 0; tries < 12; tries++) {
       if (ESP.getFreeHeap() >= need && ESP.getMaxFreeBlockSize() >= needBlk) break;
       delay(250);
@@ -584,11 +754,10 @@ void otaBootUpdate(const Settings& s) {
                (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxFreeBlockSize(),
                (unsigned)need, (unsigned)needBlk);
       record(attempts[i].tag, rxBuf, msg);
-      continue;   // this size didn't even get to try — see if another attempt is left
+      continue;
     }
 
-    // Retried once on a transient-looking error. Both tries hit the same
-    // r.url and let ESPhttpUpdate follow github.com's redirect itself.
+    // Retried once on the transient-looking errors only.
     String lastErr;
     for (uint8_t retry = 0; retry < 2; retry++) {
       if (retry) delay(300);
@@ -599,41 +768,22 @@ void otaBootUpdate(const Settings& s) {
       ESPhttpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
 
       t_httpUpdate_return ret = ESPhttpUpdate.update(client, r.url);
-      if (ret == HTTP_UPDATE_OK) return;                   // rebootOnUpdate restarts into the new image
-      if (ret == HTTP_UPDATE_NO_UPDATES) { otaBootResult(F("server reported no update")); return; }
+      if (ret == HTTP_UPDATE_OK) {
+        crumb(PH_REBOOT, (uint32_t)verNum(FW_VERSION));
+        ESP.restart();
+        return;        // never reached
+      }
+      if (ret == HTTP_UPDATE_NO_UPDATES) { crumb(PH_NONE); otaBootResult(F("server reported no update")); return; }
       lastErr = ESPhttpUpdate.getLastErrorString();
       if (lastErr != "connection lost" &&
           !lastErr.startsWith("Update error: ERROR[6]")) {
-        break;   // not the transient pattern above — a retry won't help, don't wait 300ms for nothing
+        break;         // not the transient pattern -- a retry won't help
       }
     }
-    // getLastErrorString() only runs after a real attempt was made (the heap
-    // check above passed), so heap is no longer the knife-edge it is in the
-    // branch above — a single bounded String copy here is the same risk the
-    // rest of this file already accepts (e.g. every other otaBootResult call).
     record(attempts[i].tag, rxBuf, lastErr.c_str());
   }
 
-  // Both fixed-buffer attempts above are structurally doomed on a CDN that
-  // won't shrink its TLS records (see the big comment above
-  // otaDownloadRanged()): "small" either mismatches or gets skipped, and
-  // "large" needs more contiguous heap than this device has ever produced.
-  // Falls through to the Range-chunked approach as a last resort, on a
-  // freshly re-resolved URL (rather than reusing cdnHost's resolve from
-  // above) so a slow small/large loop above can't have let the signed URL's
-  // validity window run out before the real download even starts.
-  String rangedUrl = otaResolveRedirect(r.url);
-  if (rangedUrl.length()) {
-    String rangedErr;
-    if (otaDownloadRanged(rangedUrl, rangedErr)) {
-      ESP.restart();   // otaDownloadRanged() doesn't reboot itself -- ESPhttpUpdate.rebootOnUpdate does that for the other two attempts
-      return;          // never reached; defensive
-    }
-    record("ranged", RANGE_BUF, rangedErr.c_str());
-  } else {
-    record("ranged", 0, "couldn't re-resolve the CDN URL");
-  }
-
+  crumb(PH_NONE);
   otaBootResult(String("download failed: ") + errs);
 }
 #else
@@ -641,4 +791,5 @@ bool   otaBootRequested() { return false; }
 bool   otaRequestBootUpdate(const char*) { return false; }
 void   otaBootUpdate(const Settings&) {}
 String otaTakeBootResult() { return String(); }
+void   otaReportInterrupted(const char*) {}
 #endif

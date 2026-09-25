@@ -182,6 +182,10 @@ void setup() {
 
   Serial.println("[boot] settings");
   settingsBegin();
+  // Needs LittleFS (just mounted) and must run before webPortalBegin() picks
+  // up the last update's message: if the previous boot's GitHub update was
+  // cut off by a reset, this names the step it died at (see OtaUpdate.h).
+  otaReportInterrupted(g_resetReason.c_str());
   loadSettings(g_settings);
 
   Serial.println("[boot] display");

@@ -23,6 +23,8 @@ static Settings*        S = nullptr;
 static bool             g_reboot = false;
 static uint32_t         g_rebootAt = 0;
 static bool             g_selfUpdate = false;   // GitHub self-update requested
+static bool             g_selfUpdateAuto = false;   // ...by the automatic checker, not the button
+static bool             g_autoFirstAfterBoot = false; // ...and it's this boot's first check
 static String           g_updateMsg;            // last self-update status/error
 static uint32_t         g_lastAutoCheckMs = 0;   // millis() of the last periodic check
 static bool             g_autoCheckedOnce = false;
@@ -314,6 +316,7 @@ static void handleCheckUpdate() {
 static void handleSelfUpdate() {
   if (!requireAuth()) return;
   g_selfUpdate = true;
+  g_selfUpdateAuto = false;   // the button is never subject to the automatic loop guard
   g_updateMsg = "starting...";
   server.send(200, "application/json", "{\"ok\":true}");
 }
@@ -446,10 +449,14 @@ void webPortalLoop() {
         g_autoCheckedOnce = true;
         g_lastAutoCheckMs = nowMs;
         g_selfUpdate = true;
+        g_selfUpdateAuto = true;
+        g_autoFirstAfterBoot = true;
       }
     } else if (nowMs - g_lastAutoCheckMs >= (uint32_t)S->autoUpdateHours * 3600UL * 1000UL) {
       g_lastAutoCheckMs = nowMs;
       g_selfUpdate = true;
+      g_selfUpdateAuto = true;
+      g_autoFirstAfterBoot = false;
     }
   }
 
@@ -457,6 +464,8 @@ void webPortalLoop() {
   // response first.
   if (g_selfUpdate) {
     g_selfUpdate = false;
+    const bool isAuto = g_selfUpdateAuto;
+    g_selfUpdateAuto = false;
 #if defined(SMALLTV_ESP8266)
     // RAM-tight chip: verify there is something to install, then queue the
     // download for the next boot (otaBootUpdate in setup(), ~45 KB free) and
@@ -464,13 +473,26 @@ void webPortalLoop() {
     OtaLatest r = otaCheckLatest(*S);
     if (!r.ok)         g_updateMsg = "check failed: " + r.error;
     else if (!r.newer) g_updateMsg = "already up to date (" FW_VERSION ")";
-    else if (otaRequestBootUpdate(r.tag.c_str())) {
-      g_updateMsg = "updating...";
-      scheduleReboot(400);
-    } else {
-      g_updateMsg = F("could not queue update (storage error)");
+    else if (isAuto && g_autoFirstAfterBoot && !otaAutoAttemptAllowed(r.tag)) {
+      // Loop guard (see OtaUpdate.h): this release already failed to install
+      // OTA_AUTO_MAX_TRIES times from this same first-check-after-boot slot.
+      // Don't reboot into it again; keep the last attempt's reason visible.
+      String note = "automatic install of " + r.tag + " paused after " +
+                    String(OTA_AUTO_MAX_TRIES) + " failed tries (Update now retries it)";
+      if (g_updateMsg.length()) g_updateMsg += " | ";
+      g_updateMsg += note;
+    }
+    else {
+      if (isAuto) otaNoteAutoAttempt(r.tag);   // counted before the reboot, so a crash counts too
+      if (otaRequestBootUpdate(r.tag.c_str())) {
+        g_updateMsg = "updating...";
+        scheduleReboot(400);
+      } else {
+        g_updateMsg = F("could not queue update (storage error)");
+      }
     }
 #else
+    (void)isAuto;
     // ESP32 targets: mbedTLS has the RAM to download in place; blocks while it
     // runs and reboots into the new image on success.
     String err = otaUpdateFromGitHub(*S);

@@ -39,3 +39,23 @@ bool   otaBootRequested();                     // a boot update is queued
 bool   otaRequestBootUpdate(const char* tag);  // queue it (false if storage write failed)
 void   otaBootUpdate(const Settings& s);       // consume the request; reboots on success
 String otaTakeBootResult();                    // last boot attempt's error, "" if none
+
+// Call once early in setup(), right after LittleFS is mounted and before the
+// web portal starts. If the previous boot's update was cut off by a reset
+// (watchdog, exception) -- which leaves no error message of its own, since the
+// code that would write one never ran -- this turns the progress breadcrumb it
+// left in RTC memory into the "Last update" message, naming the step and byte
+// offset it died at. After a successful update it reports the version change
+// instead. ESP8266 only; a no-op on the ESP32 targets.
+void   otaReportInterrupted(const char* resetReason);
+
+// Automatic-update loop guard (all targets). The first automatic check after
+// every boot fires a few minutes in, and on the ESP8266 a failed attempt ends
+// in a reboot -- so without this, a release the device can't install would
+// reboot it every few minutes, forever (v2.9.28 did exactly that for ~2 days).
+// The first check after a boot installs a given release at most
+// OTA_AUTO_MAX_TRIES times; after that only the regular every-N-hours check
+// (and the Update now button, which is never limited) tries it again.
+static const uint8_t OTA_AUTO_MAX_TRIES = 2;
+bool   otaAutoAttemptAllowed(const String& tag);   // fewer than OTA_AUTO_MAX_TRIES automatic tries of tag so far
+void   otaNoteAutoAttempt(const String& tag);      // count one automatic try of tag (before queueing it)
