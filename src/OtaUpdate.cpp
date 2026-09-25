@@ -43,6 +43,44 @@ static long verNum(const char* v) {
   return (long)a * 10000 + (long)b * 100 + c;
 }
 
+// Stack diet (see StockClient.cpp's STACK_LEAN): otaCheckLatest() runs from
+// the web section -- the automatic check and /api/checkupdate -- on top of the
+// web server, and /api/status "stk" showed it taking that section down to
+// ~1 KB free. Building the filter (ArduinoJson's chained proxies nest by
+// value) and reading the result now happen out of line, so neither sits on
+// the stack while the parse recurses through GitHub's release JSON.
+static __attribute__((noinline)) void otaReleaseFilter(JsonDocument& filter) {
+  filter["tag_name"] = true;
+  JsonObject fa = filter["assets"][0].to<JsonObject>();
+  fa["name"] = true;
+  fa["browser_download_url"] = true;
+}
+
+static __attribute__((noinline)) DeserializationError otaParseRelease(JsonDocument& doc, Stream& stream) {
+  JsonDocument filter;                      // keep only the fields we need; the payload is large
+  otaReleaseFilter(filter);
+  return deserializeJson(doc, stream, DeserializationOption::Filter(filter));
+}
+
+static __attribute__((noinline)) void otaReadRelease(JsonDocument& doc, OtaLatest& r) {
+  r.tag = (const char*)(doc["tag_name"] | "");
+  for (JsonObjectConst a : doc["assets"].as<JsonArrayConst>()) {
+    if (strcmp(a["name"] | "", UPDATE_ASSET) == 0) {
+      r.url = (const char*)(a["browser_download_url"] | "");
+      break;
+    }
+  }
+  if (r.tag.length() == 0 || r.url.length() == 0) {
+    r.error = F("no matching asset");                   // not retryable
+  } else {
+    String latest = r.tag;
+    if (latest.startsWith("v")) latest.remove(0, 1);
+    r.newer = verNum(latest.c_str()) > verNum(FW_VERSION);
+    r.error = "";
+    r.ok = true;
+  }
+}
+
 OtaLatest otaCheckLatest(const Settings& s) {
   OtaLatest r;
   if (ESP.getFreeHeap() < 20000) { r.error = F("low heap"); return r; }
@@ -71,7 +109,11 @@ OtaLatest otaCheckLatest(const Settings& s) {
     client.setBufferSizes(probeMfln(GH_API_HOST), 512);
 #endif
 
-    HTTPClient http;
+    // On the heap, not the 4 KB loop stack: this runs from the web section
+    // (the automatic check and /api/checkupdate), on top of the web server.
+    std::unique_ptr<HTTPClient> httpOwner(new (std::nothrow) HTTPClient());
+    if (!httpOwner) { r.error = F("out of memory"); return r; }
+    HTTPClient& http = *httpOwner;
     // A stalled stream truncates into a "parse failed"; the retries below clear
     // that, so keep the per-attempt timeout modest to stay responsive (this runs
     // in the ESP32 web handler) rather than blocking long on each failing try.
@@ -96,35 +138,12 @@ OtaLatest otaCheckLatest(const Settings& s) {
         r.error = "HTTP " + String(code);
         retryable = (code >= 500);                            // server-side -> transient
       } else {
-        // Keep only the fields we need; the releases payload is large.
-        JsonDocument filter;
-        filter["tag_name"] = true;
-        JsonObject fa = filter["assets"][0].to<JsonObject>();
-        fa["name"] = true;
-        fa["browser_download_url"] = true;
-
         JsonDocument doc;
-        DeserializationError err =
-            deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
+        DeserializationError err = otaParseRelease(doc, http.getStream());
         if (err) {
           r.error = F("parse failed"); retryable = true;      // truncated/stalled stream
         } else {
-          r.tag = (const char*)(doc["tag_name"] | "");
-          for (JsonObjectConst a : doc["assets"].as<JsonArrayConst>()) {
-            if (strcmp(a["name"] | "", UPDATE_ASSET) == 0) {
-              r.url = (const char*)(a["browser_download_url"] | "");
-              break;
-            }
-          }
-          if (r.tag.length() == 0 || r.url.length() == 0) {
-            r.error = F("no matching asset");                 // not retryable
-          } else {
-            String latest = r.tag;
-            if (latest.startsWith("v")) latest.remove(0, 1);
-            r.newer = verNum(latest.c_str()) > verNum(FW_VERSION);
-            r.error = "";
-            r.ok = true;
-          }
+          otaReadRelease(doc, r);
         }
       }
       http.end();
