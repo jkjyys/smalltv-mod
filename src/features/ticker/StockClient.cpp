@@ -3,6 +3,21 @@
 #include <ArduinoJson.h>
 #include <math.h>
 #include <time.h>
+#include <memory>
+#include <new>
+
+// Stack diet (v2.9.36). The ESP8266 runs loop() on a fixed 4 KB stack, and
+// /api/status "stk" showed the ticker's fetch path leaving only ~256 bytes of
+// it free -- with an interrupt's frame (a few hundred bytes, pushed onto
+// whatever stack is running) able to land on top at any moment, that is close
+// enough to overflow to explain crashes like the ones seen in September 2026.
+// The ELF showed fetchUrl() with a 976-byte frame: GCC had inlined all seven
+// parse*() functions into it, each with its own pair of JsonDocuments and
+// locals, and gave every one of them separate stack slots at once. Keeping
+// the parsers out of line means only the parser actually running holds stack,
+// on top of a much smaller fetchUrl(); and the HTTPClient (~150 bytes) now
+// lives on the heap for the duration of one request instead of the stack.
+#define STACK_LEAN __attribute__((noinline))
 
 // ---------------------------------------------------------------------------
 // US market hours (for SymbolCfg.altSymbol — see config.h's BINANCE_HOST
@@ -297,7 +312,7 @@ static String buildGithubUrl(const char* symbol) {
 }
 
 // ---- parse: custom webhook contract ---------------------------------------
-static bool parseWebhook(const Settings& s, StockData& d, Stream& stream) {
+static STACK_LEAN bool parseWebhook(const Settings& s, StockData& d, Stream& stream) {
   // Filter so unexpected/large fields don't blow up the heap.
   JsonDocument filter;
   filter["symbol"] = true;
@@ -359,7 +374,7 @@ static bool parseWebhook(const Settings& s, StockData& d, Stream& stream) {
 }
 
 // ---- parse: Yahoo Finance chart payload -----------------------------------
-static bool parseYahoo(const Settings& s, StockData& d, Stream& stream) {
+static STACK_LEAN bool parseYahoo(const Settings& s, StockData& d, Stream& stream) {
   // Keep only the handful of fields we need; the full payload is large and the
   // `meta` object alone has many nested members we don't care about.
   JsonDocument filter;
@@ -467,7 +482,7 @@ static bool parseYahoo(const Settings& s, StockData& d, Stream& stream) {
 // {"data":{"quoteList":{"quoteList":{"edges":[{"node":{"lval":"1086.51",
 //  "iNetVperprV":"7.36","perfPercentage":"0.68","mCur":"USD",...}}]}}}}
 // Numeric fields arrive as JSON *strings*, so read them as text and atof().
-static bool parseCashQuote(const Settings& s, StockData& d, Stream& stream) {
+static STACK_LEAN bool parseCashQuote(const Settings& s, StockData& d, Stream& stream) {
   JsonDocument filter;
   JsonObject node =
       filter["data"]["quoteList"]["quoteList"]["edges"][0]["node"].to<JsonObject>();
@@ -526,7 +541,7 @@ static bool parseCashQuote(const Settings& s, StockData& d, Stream& stream) {
 // the last regular-session trade. No sparkline: the free tier's candle
 // endpoint isn't available without a paid plan, so Finnhub symbols show price
 // + change only.
-static bool parseFinnhubQuote(const Settings& s, StockData& d, Stream& stream) {
+static STACK_LEAN bool parseFinnhubQuote(const Settings& s, StockData& d, Stream& stream) {
   JsonDocument filter;
   filter["c"] = true;
   filter["d"] = true;
@@ -565,7 +580,7 @@ static bool parseFinnhubQuote(const Settings& s, StockData& d, Stream& stream) {
 // Binance /fapi/v1/ticker/24hr — all the numeric fields arrive as JSON
 // *strings* (Binance convention across their whole API), same as cash.ch
 // above: read as text and atof(), not as numbers.
-static bool parseBinanceQuote(const Settings& s, StockData& d, Stream& stream) {
+static STACK_LEAN bool parseBinanceQuote(const Settings& s, StockData& d, Stream& stream) {
   JsonDocument filter;
   filter["lastPrice"] = true;
   filter["priceChange"] = true;
@@ -611,7 +626,7 @@ static bool parseBinanceQuote(const Settings& s, StockData& d, Stream& stream) {
 // and an untested filter shape failing silently (candles kept but empty) is
 // a worse failure mode than just parsing the whole row and indexing into it.
 // The request itself stays small (limit=20 above) to keep this cheap anyway.
-static bool parseBinanceKlines(StockData& d, Stream& stream) {
+static STACK_LEAN bool parseBinanceKlines(StockData& d, Stream& stream) {
   JsonDocument doc;
   DeserializationError err = deserializeJson(doc, stream);
   if (err) return false;
@@ -633,7 +648,7 @@ static bool parseBinanceKlines(StockData& d, Stream& stream) {
 // {"data":{"integration":{"solid":{"chart":{"timeserie":{"prices":
 //  [{"close":998.45},...]}}}}}} — closes are real JSON numbers here (unlike
 // the quote), oldest -> newest. Downsampling mirrors the Yahoo parser.
-static bool parseCashChart(const Settings& s, StockData& d, Stream& stream) {
+static STACK_LEAN bool parseCashChart(const Settings& s, StockData& d, Stream& stream) {
   JsonDocument filter;
   filter["data"]["integration"]["solid"]["chart"]["timeserie"]["prices"][0]["close"] = true;
 
@@ -742,7 +757,9 @@ static bool fetchUrl(const Settings& s, const String& url, ParseKind kind, Stock
     client.reset(new WiFiClient());
   }
 
-  HTTPClient http;
+  std::unique_ptr<HTTPClient> httpOwner(new (std::nothrow) HTTPClient());   // heap, not stack (see STACK_LEAN)
+  if (!httpOwner) { d.dbgLastHttpCode = -1001; return false; }
+  HTTPClient& http = *httpOwner;
   http.setTimeout(s.httpTimeout);
   http.setReuse(false);
   // HTTP/1.0 so the server can't reply with chunked framing: the parsers read
