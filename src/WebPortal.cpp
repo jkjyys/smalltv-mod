@@ -6,6 +6,7 @@
 #include "Net.h"
 #include "Gfx.h"
 #include "OtaUpdate.h"
+#include "CrashTrace.h"
 #include "StockClient.h"
 #include "UsageClient.h"
 #include "WeatherClient.h"
@@ -17,6 +18,8 @@
 extern void appInvalidate();
 extern const char* appResetReason();   // last reset reason (diagnostics)
 extern void appApplyBrightness();   // main.cpp: re-resolve effective brightness now
+extern uint32_t appStackMin();        // main.cpp: lowest free stack seen in any loop section
+extern void appStackJson(JsonObject o);   // main.cpp: that low-water mark per section
 
 static WebServerClass server(80);
 static Settings*        S = nullptr;
@@ -112,7 +115,9 @@ static void handleStatus() {
   o["rssi"] = netRSSI();
   o["heap"] = ESP.getFreeHeap();
   o["maxblk"] = platformMaxFreeBlock();     // largest contiguous block (TLS handshake needs one)
-  o["contstk"] = platformFreeContStack();   // primary stack headroom (ESP8266)
+  o["contstk"] = appStackMin();             // primary stack headroom (ESP8266), all-time low
+  appStackJson(o["stk"].to<JsonObject>());  // ...and per loop section (main.cpp)
+  crashTraceJson(o["crashes"].to<JsonArray>());   // last few crashes' details (CrashTrace.h)
   o["uptime"] = millis() / 1000;
   o["reset"] = appResetReason();
   o["synced"] = clockSynced();

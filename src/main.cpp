@@ -18,6 +18,7 @@
 #include "Gfx.h"
 #include "WebPortal.h"
 #include "OtaUpdate.h"
+#include "CrashTrace.h"
 #include "Mode.h"
 #include "Clock.h"
 #include "WgClient.h"
@@ -106,11 +107,66 @@ static DisplayMode* activeMode(const Settings& s) {
   return kModeCount ? kModes[0] : nullptr;   // fall back to the first compiled mode
 }
 
+// ---- stack headroom per loop section (diagnostics) -------------------------
+// The ESP8266 runs setup()/loop() on a fixed 4 KB stack. /api/status used to
+// report only its all-time low-water mark ("contstk"), which sat within 32-256
+// bytes of full in normal running -- close enough that an occasional overflow
+// is a live suspect for the September 2026 crashes -- but not WHICH part of the
+// loop takes it there. Each section below starts from a freshly repainted
+// stack and keeps its own low-water mark, reported as /api/status "stk".
+enum : uint8_t { STK_NET, STK_WEB, STK_CLOCK, STK_NOTIFY, STK_MODES };
+static const size_t kStkSlots = STK_MODES + kModeCount;
+static uint16_t g_stkMin[kStkSlots];
+
+static inline void stkBegin() {
+#if defined(SMALLTV_ESP8266)
+  ESP.resetFreeContStack();
+#endif
+}
+static inline void stkEnd(size_t slot) {
+#if defined(SMALLTV_ESP8266)
+  uint32_t f = ESP.getFreeContStack();
+  if (slot < kStkSlots && f < g_stkMin[slot]) g_stkMin[slot] = (uint16_t)f;
+#else
+  (void)slot;
+#endif
+}
+
+// Lowest free stack seen in any section (what "contstk" used to mean).
+uint32_t appStackMin() {
+#if defined(SMALLTV_ESP8266)
+  uint32_t m = 0xFFFF;
+  for (size_t i = 0; i < kStkSlots; i++) if (g_stkMin[i] < m) m = g_stkMin[i];
+  return m;
+#else
+  return platformFreeContStack();
+#endif
+}
+
+void appStackJson(JsonObject o) {
+  static const char* const kNames[STK_MODES] = { "net", "web", "clock", "notify" };
+  for (size_t i = 0; i < kStkSlots; i++) {
+    if (g_stkMin[i] == 0xFFFF) continue;   // section hasn't run yet
+    const char* name = (i < STK_MODES) ? kNames[i] : kModes[i - STK_MODES]->id();
+    o[name] = g_stkMin[i];
+  }
+}
+
 static Settings g_settings;
 static String   g_resetReason;        // why the chip last reset (diagnostics)
 static bool     g_safeMode = false;   // last reset was an exception -> don't re-enter the crash
 static char     g_epcStr[16] = "";
 static char     g_addrStr[16] = "";
+static uint8_t  g_crashStreak = 0;    // crashes without a healthy run in between (CrashTrace)
+static bool     g_streakCleared = false;
+// Safe mode used to last until someone rebooted the device by hand, leaving the
+// crash screen up (and every feature off) indefinitely after a single crash.
+// Now it lasts SAFE_MODE_RECOVER_MS and then reboots normally -- unless crashes
+// keep coming (SAFE_MODE_MAX_STREAK in a row, each within HEALTHY_RUN_MS of
+// the last recovery), in which case it stays put so a crash loop can't hide.
+static const uint32_t SAFE_MODE_RECOVER_MS  = 10UL * 60UL * 1000UL;
+static const uint8_t  SAFE_MODE_MAX_STREAK  = 3;
+static const uint32_t HEALTHY_RUN_MS        = 30UL * 60UL * 1000UL;
 static int g_lastBr = -1;        // last effective brightness written (-1 = none yet)
 #if HAS_LDR
 static uint32_t g_lastAutoBr = 0;
@@ -186,6 +242,9 @@ void setup() {
   // up the last update's message: if the previous boot's GitHub update was
   // cut off by a reset, this names the step it died at (see OtaUpdate.h).
   otaReportInterrupted(g_resetReason.c_str());
+  crashTraceBoot();                           // log the last crash's details, if any
+  g_crashStreak = crashStreakOnBoot(pr.wasCrash);
+  for (size_t i = 0; i < kStkSlots; i++) g_stkMin[i] = 0xFFFF;
   loadSettings(g_settings);
 
   Serial.println("[boot] display");
@@ -262,8 +321,8 @@ void setup() {
 }
 
 void loop() {
-  netLoop();
-  webPortalLoop();
+  stkBegin(); netLoop();       stkEnd(STK_NET);
+  stkBegin(); webPortalLoop(); stkEnd(STK_WEB);
 
   if (webPortalRebootDue()) {
     delay(120);
@@ -276,6 +335,14 @@ void loop() {
   wgService(g_settings);
 
   if (g_safeMode) {
+    // See SAFE_MODE_RECOVER_MS above: give the features another go after a
+    // while, unless this is already a streak of crashes (or an upload is
+    // being written right now).
+    if (g_crashStreak < SAFE_MODE_MAX_STREAK && millis() >= SAFE_MODE_RECOVER_MS &&
+        !Update.isRunning()) {
+      delay(120);
+      ESP.restart();
+    }
     delay(5);
     return;  // crashed last boot: web UI stays up for OTA recovery, no rendering
   }
@@ -287,17 +354,26 @@ void loop() {
 
   // --- STA mode: the active feature fetches + renders itself ---
 
+  if (!g_streakCleared && millis() >= HEALTHY_RUN_MS) {
+    crashStreakNoteHealthy();   // ran normally long enough: forget earlier crashes
+    g_streakCleared = true;
+  }
+
   // Night-mode state machine (NTP-trust gate), then apply the effective brightness
   // (night override / auto-brightness / manual level).
+  stkBegin();
   clockService(g_settings);
   appApplyBrightness();
+  stkEnd(STK_CLOCK);
 
   // On expiry the carousel dwell is credited back the time it was hidden, so it
   // resumes on the same feature with the same remaining slice.
   static bool wasNotifying = false;
   if (g_notifyMode.active()) {
     wasNotifying = true;
+    stkBegin();
     g_notifyMode.service(g_settings);
+    stkEnd(STK_NOTIFY);
     delay(5);
     return;
   }
@@ -307,10 +383,14 @@ void loop() {
     if (g_carSwitch) g_carSwitch += g_notifyMode.heldMs();
   }
 
-  DisplayMode* m = activeMode(g_settings);
+  stkBegin();
+  DisplayMode* m = activeMode(g_settings);   // may wake() the incoming carousel mode
   if (m) {
     if (restore) m->wake(g_settings);
     m->service(g_settings);
+    for (size_t i = 0; i < kModeCount; i++) {
+      if (kModes[i] == m) { stkEnd(STK_MODES + i); break; }
+    }
   }
 
   delay(5);
