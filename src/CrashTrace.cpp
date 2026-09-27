@@ -2,7 +2,10 @@
 #include "CrashTrace.h"
 #include "Platform.h"
 #include "config.h"
+#include "Net.h"
 #include <LittleFS.h>
+
+volatile uint8_t g_crashAct = ACT_BOOT;
 
 #if defined(SMALLTV_ESP8266)
 
@@ -22,9 +25,11 @@ static const uint32_t CRASH_BLOCK  = 104;
 static const uint32_t CRASH_MAGIC  = 0x43525331UL;   // "CRS1"
 static const uint32_t TRACE_MAX    = 12;
 // magic, reason, exccause, epc1, excvaddr, uptimeMs, failAlloc, failSize, n,
-// trace[TRACE_MAX], check
-static const uint32_t CRASH_WORDS  = 9 + TRACE_MAX + 1;   // 22 words: blocks 104..125
-static const uint32_t STREAK_BLOCK = 126;
+// trace[TRACE_MAX], context, check
+// context = activity | disconnects<<8 (saturating) | seconds since the last
+// disconnect<<16 (0xFFFF = none / too long ago)
+static const uint32_t CRASH_WORDS  = 9 + TRACE_MAX + 2;   // 23 words: blocks 104..126
+static const uint32_t STREAK_BLOCK = 127;
 static const uint32_t STREAK_MAGIC = 0x5AFE0000UL;
 
 static const char*  CRASH_LOG      = "/crash.log";
@@ -56,6 +61,11 @@ extern "C" void custom_crash_callback(struct rst_info* ri, uint32_t stack, uint3
     if (isCodeAddr(v)) w[9 + n++] = v;
   }
   w[8] = n;
+  uint32_t disc = netDisconnects();
+  uint32_t since = netMsSinceDisconnect();
+  since = (since == 0xFFFFFFFFUL) ? 0xFFFF : since / 1000;
+  w[9 + TRACE_MAX] = (uint32_t)g_crashAct | ((disc > 255 ? 255 : disc) << 8) |
+                     ((since > 0xFFFF ? 0xFFFF : since) << 16);
   uint32_t check = 0xA5A5A5A5UL;
   for (uint32_t i = 0; i < CRASH_WORDS - 1; i++) check ^= w[i] + i;
   w[CRASH_WORDS - 1] = check;
@@ -84,13 +94,24 @@ void crashTraceBoot() {
 
   // One line per crash, e.g.
   // "v2.9.34 exception(28) epc 0x4000df64 addr 0x00000000 up 812s trace 0x4020a1b2 ..."
-  char line[260];
+  char line[320];
   int len = snprintf(line, sizeof(line), "v" FW_VERSION " %s(%u) epc 0x%08x addr 0x%08x up %us",
                      reasonText(w[1]), (unsigned)w[2], (unsigned)w[3], (unsigned)w[4],
                      (unsigned)(w[5] / 1000));
   if (w[6] && len > 0 && len < (int)sizeof(line)) {
     len += snprintf(line + len, sizeof(line) - len, " failedAlloc 0x%08x(%u)",
                     (unsigned)w[6], (unsigned)w[7]);
+  }
+  uint32_t ctx = w[9 + TRACE_MAX];
+  if (len > 0 && len < (int)sizeof(line)) {
+    uint32_t since = ctx >> 16;
+    if (since == 0xFFFF) {
+      len += snprintf(line + len, sizeof(line) - len, " act %u disc %u",
+                      (unsigned)(ctx & 0xFF), (unsigned)((ctx >> 8) & 0xFF));
+    } else {
+      len += snprintf(line + len, sizeof(line) - len, " act %u disc %u (last %us before)",
+                      (unsigned)(ctx & 0xFF), (unsigned)((ctx >> 8) & 0xFF), (unsigned)since);
+    }
   }
   uint32_t n = w[8] > TRACE_MAX ? TRACE_MAX : w[8];
   if (n && len > 0 && len < (int)sizeof(line)) {
@@ -153,6 +174,8 @@ void crashStreakNoteHealthy() {
 }
 
 #else   // ESP32 targets: no custom_crash_callback hook here
+
+volatile uint8_t g_crashAct = ACT_BOOT;
 
 void    crashTraceBoot() {}
 void    crashTraceJson(JsonArray) {}

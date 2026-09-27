@@ -21,6 +21,19 @@
 // Call once in setup(), after LittleFS is mounted.
 void crashTraceBoot();
 
+// What the main loop was doing, recorded with each crash ("act" in the log).
+// A crash in the WiFi SDK happens in the system context, between two of the
+// loop's yields -- this says which part of the loop had yielded at the time.
+enum CrashAct : uint8_t {
+  ACT_BOOT = 0, ACT_NET, ACT_WEB, ACT_CLOCK, ACT_NOTIFY, ACT_MODE,
+  ACT_TLS_CONNECT,   // HTTPClient::GET() of a feature fetch: DNS, TCP, TLS handshake, headers
+  ACT_BODY_READ,     // reading/parsing a feature fetch's response body
+  ACT_OTA_CHECK,     // the GitHub release check
+  ACT_IDLE,          // loop()'s closing delay()
+};
+extern volatile uint8_t g_crashAct;
+static inline void crashActivity(uint8_t a) { g_crashAct = a; }
+
 // Appends the logged crashes (newest last) to a JSON array.
 void crashTraceJson(JsonArray out);
 

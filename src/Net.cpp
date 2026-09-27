@@ -12,6 +12,27 @@ static int8_t      g_curNet = -1;        // settings index of the joined network
 static uint32_t    g_downSince = 0;      // 0 = connected; else millis() the drop began
 static bool        g_mdnsStarted = false;
 
+// ---- link diagnostics -------------------------------------------------------
+// The crashes of September 2026 all died inside the WiFi SDK's beacon handling
+// (ieee80211_setup_ratetable <- cnx_update_bss_more <- scan_parse_beacon), and
+// only ever with the features running, never in safe mode. One suspect is
+// the link dropping (e.g. beacons missed while a long TLS handshake holds the
+// CPU) and the SDK tearing down / rebuilding the connection while beacons are
+// still being parsed -- so count what the link actually does.
+static volatile uint16_t g_discCount = 0;
+static volatile int      g_discReason = 0;
+static volatile uint32_t g_discAtMs = 0;
+static bool              g_discAny = false;
+static uint16_t          g_forcedReconnects = 0;
+#if defined(SMALLTV_ESP8266)
+static WiFiEventHandler  g_onDisc;   // must stay alive for the handler to stay registered
+#endif
+
+uint16_t netDisconnects()          { return g_discCount; }
+int      netLastDisconnectReason() { return g_discReason; }
+uint32_t netMsSinceDisconnect()    { return g_discAny ? (millis() - g_discAtMs) : 0xFFFFFFFFUL; }
+uint16_t netForcedReconnects()     { return g_forcedReconnects; }
+
 static void startAP(const Settings& s) {
   g_mode = NET_AP;
   WiFi.mode(WIFI_AP);
@@ -50,6 +71,14 @@ void netBegin(const Settings& s, void (*onProgress)(const char*), bool deferMdns
   g_hostname = s.hostname.length() ? s.hostname : String(DEFAULT_HOSTNAME);
   WiFi.persistent(false);
   WiFi.setAutoReconnect(true);
+#if defined(SMALLTV_ESP8266)
+  g_onDisc = WiFi.onStationModeDisconnected([](const WiFiEventStationModeDisconnected& e) {
+    if (g_discCount < 0xFFFF) g_discCount++;
+    g_discReason = (int)e.reason;
+    g_discAtMs = millis();
+    g_discAny = true;
+  });
+#endif
   platformSetHostname(g_hostname.c_str());
 
   if (s.wifiCount == 0) {
@@ -59,24 +88,6 @@ void netBegin(const Settings& s, void (*onProgress)(const char*), bool deferMdns
   }
 
   WiFi.mode(WIFI_STA);
-
-#if defined(SMALLTV_ESP8266)
-  // 802.11g, not the default 802.11n. From September 2026 the device kept
-  // crashing inside the WiFi SDK itself (crash log: Exception 29, a memcpy to
-  // address 0 in ieee80211_setup_ratetable <- ieee80211_phy_init <-
-  // cnx_update_bss_more <- scan_parse_beacon <- sta_input: re-deriving the
-  // PHY rate table from the connected router's beacon). It is a known,
-  // never-fixed NONOS SDK bug (espressif/ESP8266_NONOS_SDK issue #320), and
-  // the standard workaround for SDK trouble with some routers (WLED and
-  // Tasmota both ship a force-802.11g option) is to keep the chip off 802.11n
-  // entirely. 802.11g's 54 Mbit/s is far more than this device ever uses.
-  // If no saved network accepts an 802.11g client (an "N only" router), the
-  // loop below tries again in 802.11n before giving up.
-  WiFi.setPhyMode(WIFI_PHY_MODE_11G);
-  const uint8_t kPasses = 2;
-#else
-  const uint8_t kPasses = 1;
-#endif
 
   // Try order: scan once (blocking is fine here, only the boot screen is up)
   // and put the networks the scan can see first, strongest first. Unseen ones
@@ -114,36 +125,31 @@ void netBegin(const Settings& s, void (*onProgress)(const char*), bool deferMdns
     }
   }
 
-  for (uint8_t pass = 0; pass < kPasses; pass++) {
-#if defined(SMALLTV_ESP8266)
-    if (pass == 1) WiFi.setPhyMode(WIFI_PHY_MODE_11N);   // see the 802.11g note above
-#endif
-    for (uint8_t k = 0; k < s.wifiCount; k++) {
-      const WifiCred& n = s.wifi[order[k]];
-      if (onProgress) {
-        char msg[48];
-        snprintf(msg, sizeof(msg), "WiFi: %s", n.ssid.c_str());
-        onProgress(msg);
-      }
-      WiFi.begin(n.ssid.c_str(), n.pass.c_str());
-
-      uint32_t budget = seen[order[k]] ? 15000 : 8000;
-      uint32_t start = millis();
-      while (WiFi.status() != WL_CONNECTED && millis() - start < budget) {
-        delay(200);
-        yield();
-      }
-
-      if (WiFi.status() == WL_CONNECTED) {
-        g_curNet = (int8_t)order[k];
-        g_mode = NET_STA;
-        if (!deferMdns) netStartMdns();
-        if (onProgress) onProgress(WiFi.localIP().toString().c_str());
-        return;
-      }
-      WiFi.disconnect();
-      delay(100);
+  for (uint8_t k = 0; k < s.wifiCount; k++) {
+    const WifiCred& n = s.wifi[order[k]];
+    if (onProgress) {
+      char msg[48];
+      snprintf(msg, sizeof(msg), "WiFi: %s", n.ssid.c_str());
+      onProgress(msg);
     }
+    WiFi.begin(n.ssid.c_str(), n.pass.c_str());
+
+    uint32_t budget = seen[order[k]] ? 15000 : 8000;
+    uint32_t start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < budget) {
+      delay(200);
+      yield();
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+      g_curNet = (int8_t)order[k];
+      g_mode = NET_STA;
+      if (!deferMdns) netStartMdns();
+      if (onProgress) onProgress(WiFi.localIP().toString().c_str());
+      return;
+    }
+    WiFi.disconnect();
+    delay(100);
   }
 
   if (onProgress) onProgress("WiFi failed -> AP");
@@ -165,14 +171,23 @@ void netLoop() {
     return;
   }
   if (!g_downSince) g_downSince = millis();
-  if (millis() - g_lastReconnect > 10000) {
+  // The SDK's own auto-reconnect (setAutoReconnect above) is already retrying
+  // the moment the link drops. This used to force WiFi.reconnect() -- a hard
+  // disconnect + connect -- every 10 s on top of it, i.e. tearing down the
+  // SDK's connection attempt mid-flight while it may still be parsing that
+  // router's beacons, which is where every crash of September 2026 died (see
+  // the diagnostics note above). Now it leaves the first 60 s of an outage to
+  // the SDK and only then nudges, every 30 s, as a fallback.
+  uint32_t down = millis() - g_downSince;
+  if (down > 60000 && millis() - g_lastReconnect > 30000) {
     g_lastReconnect = millis();
-    if (g_cfg && g_cfg->wifiCount > 1 && millis() - g_downSince > 45000) {
+    if (g_forcedReconnects < 0xFFFF) g_forcedReconnects++;
+    if (g_cfg && g_cfg->wifiCount > 1) {
       g_curNet = (int8_t)((g_curNet + 1) % g_cfg->wifiCount);
       WiFi.begin(g_cfg->wifi[g_curNet].ssid.c_str(), g_cfg->wifi[g_curNet].pass.c_str());
-      g_downSince = millis();   // give this candidate its own window before rotating on
+      g_downSince = millis() - 30000;   // this candidate gets 30 s before rotating on
     } else {
-      WiFi.reconnect();         // first ~45 s: keep nudging the current network
+      WiFi.reconnect();
     }
   }
 }

@@ -113,6 +113,14 @@ static void handleStatus() {
   o["ssid"] = netSSID();
   o["ip"] = netIP();
   o["rssi"] = netRSSI();
+  {   // WiFi link diagnostics (see Net.h): drops since boot, last reason, forced reconnects
+    JsonObject lk = o["link"].to<JsonObject>();
+    lk["disc"]   = netDisconnects();
+    lk["reason"] = netLastDisconnectReason();
+    uint32_t since = netMsSinceDisconnect();
+    if (since != 0xFFFFFFFFUL) lk["sinceDisc"] = since / 1000;
+    lk["forced"] = netForcedReconnects();
+  }
   o["heap"] = ESP.getFreeHeap();
   o["maxblk"] = platformMaxFreeBlock();     // largest contiguous block (TLS handshake needs one)
   o["contstk"] = appStackMin();             // primary stack headroom (ESP8266), all-time low

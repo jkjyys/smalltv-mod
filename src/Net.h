@@ -18,6 +18,14 @@ void netBegin(const Settings& s, void (*onProgress)(const char*) = nullptr, bool
 void netStartMdns();      // start mDNS + service adverts now; no-op if not STA or already done
 void netLoop();           // pump DNS (AP) / mDNS (STA) / reconnect
 
+// WiFi link diagnostics (ESP8266; zeros elsewhere), for /api/status and the
+// crash log: station disconnects since boot, the SDK's reason code for the
+// last one, how long ago it was, and how often netLoop() forced a reconnect.
+uint16_t netDisconnects();
+int      netLastDisconnectReason();
+uint32_t netMsSinceDisconnect();       // 0xFFFFFFFF if none yet
+uint16_t netForcedReconnects();
+
 NetMode  netMode();
 bool     netConnected();  // STA associated with an IP
 String   netIP();         // current IP (STA or AP)

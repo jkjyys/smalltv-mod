@@ -325,8 +325,8 @@ void setup() {
 }
 
 void loop() {
-  stkBegin(); netLoop();       stkEnd(STK_NET);
-  stkBegin(); webPortalLoop(); stkEnd(STK_WEB);
+  crashActivity(ACT_NET); stkBegin(); netLoop();       stkEnd(STK_NET);
+  crashActivity(ACT_WEB); stkBegin(); webPortalLoop(); stkEnd(STK_WEB);
 
   if (webPortalRebootDue()) {
     delay(120);
@@ -339,6 +339,7 @@ void loop() {
   wgService(g_settings);
 
   if (g_safeMode) {
+    crashActivity(ACT_IDLE);
     // See SAFE_MODE_RECOVER_MS above: give the features another go after a
     // while, unless this is already a streak of crashes (or an upload is
     // being written right now).
@@ -366,6 +367,7 @@ void loop() {
 
   // Night-mode state machine (NTP-trust gate), then apply the effective brightness
   // (night override / auto-brightness / manual level).
+  crashActivity(ACT_CLOCK);
   stkBegin();
   clockService(g_settings);
   appApplyBrightness();
@@ -376,6 +378,7 @@ void loop() {
   static bool wasNotifying = false;
   if (g_notifyMode.active()) {
     wasNotifying = true;
+    crashActivity(ACT_NOTIFY);
     stkBegin();
     g_notifyMode.service(g_settings);
     stkEnd(STK_NOTIFY);
@@ -388,6 +391,7 @@ void loop() {
     if (g_carSwitch) g_carSwitch += g_notifyMode.heldMs();
   }
 
+  crashActivity(ACT_MODE);
   stkBegin();
   DisplayMode* m = activeMode(g_settings);   // may wake() the incoming carousel mode
   if (m) {
@@ -398,5 +402,6 @@ void loop() {
     }
   }
 
+  crashActivity(ACT_IDLE);
   delay(5);
 }

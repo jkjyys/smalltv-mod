@@ -4,6 +4,7 @@
 #include <LittleFS.h>
 #include "config.h"
 #include "Gfx.h"
+#include "CrashTrace.h"
 #include <memory>
 #include <new>
 
@@ -82,6 +83,7 @@ static __attribute__((noinline)) void otaReadRelease(JsonDocument& doc, OtaLates
 }
 
 OtaLatest otaCheckLatest(const Settings& s) {
+  crashActivity(ACT_OTA_CHECK);
   OtaLatest r;
   if (ESP.getFreeHeap() < 20000) { r.error = F("low heap"); return r; }
 
