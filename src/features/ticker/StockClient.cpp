@@ -1,5 +1,6 @@
 #include "StockClient.h"
 #include "Platform.h"
+#include "CrashTrace.h"
 #include <ArduinoJson.h>
 #include <math.h>
 #include <time.h>
@@ -819,7 +820,9 @@ static bool fetchUrl(const Settings& s, const String& url, ParseKind kind, Stock
     http.setUserAgent(F(CASH_USER_AGENT));    // cash.ch requires none; sent to be identifiable
   }
 
+  crashActivity(ACT_TLS_CONNECT);
   int code = http.GET();
+  crashActivity(ACT_MODE);
   d.dbgLastHttpCode = (int16_t)code;   // diagnostic: surfaced via /api/status regardless of source
   if (code != HTTP_CODE_OK) {
     http.end();
@@ -827,6 +830,7 @@ static bool fetchUrl(const Settings& s, const String& url, ParseKind kind, Stock
   }
 
   bool ok;
+  crashActivity(ACT_BODY_READ);
   switch (kind) {
     case PARSE_YAHOO:      ok = parseYahoo(s, d, http.getStream());     break;
     case PARSE_CASH_QUOTE: ok = parseCashQuote(s, d, http.getStream()); break;
@@ -836,6 +840,7 @@ static bool fetchUrl(const Settings& s, const String& url, ParseKind kind, Stock
     case PARSE_BINANCE_KLINES: ok = parseBinanceKlines(d, http.getStream()); break;
     default:               ok = parseWebhook(s, d, http.getStream());   break;  // webhook + github: same JSON
   }
+  crashActivity(ACT_MODE);
   if (!ok) d.dbgLastHttpCode = -800;   // 200 OK but the body didn't parse the way this source expects
   http.end();
   return ok;
