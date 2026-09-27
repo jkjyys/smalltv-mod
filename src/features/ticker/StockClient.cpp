@@ -26,6 +26,9 @@
 // parse, so none of that is on the stack while it recurses.
 #define STACK_LEAN __attribute__((noinline))
 
+// See fetchUrl(): below this much free heap, skip building a JSON document.
+static const uint32_t PARSE_MIN_FREE_HEAP = 6000;
+
 // ---------------------------------------------------------------------------
 // US market hours (for SymbolCfg.altSymbol — see config.h's BINANCE_HOST
 // comment). Computed straight from UTC + a hand-rolled US DST rule, entirely
@@ -305,7 +308,7 @@ static String buildBinanceKlinesUrl(const Settings& s, const char* symbol) {
   url += urlEncode(symbol);
   url += F("&interval=");
   url += binanceInterval(range);
-  url += F("&limit=20");   // kept modest: unfiltered parsing below keeps the whole 12-field row per candle
+  url += F("&limit=20");   // parsed by a streaming scanner (parseBinanceKlines): size barely matters
   return url;
 }
 
@@ -647,28 +650,69 @@ static STACK_LEAN bool parseBinanceQuote(const Settings& s, StockData& d, Stream
 }
 
 // Binance /fapi/v1/klines — each candle is a 12-element array; index 4 is the
-// close price (as a string, same convention as the quote endpoint). No
-// filter here — ArduinoJson's array filters are documented for object keys
-// far more clearly than for picking one column out of an array-of-arrays,
-// and an untested filter shape failing silently (candles kept but empty) is
-// a worse failure mode than just parsing the whole row and indexing into it.
-// The request itself stays small (limit=20 above) to keep this cheap anyway.
+// close price (as a string, same convention as the quote endpoint):
+//   [[1499040000000,"0.01634790","0.80000000","0.01575800","0.01577100",...],...]
+//
+// Scanned straight off the stream, one character at a time, keeping nothing
+// but the close price being read (v2.9.44). It used to go through a full,
+// unfiltered JsonDocument -- 20 candles x 12 fields, every one of them a
+// string -- which on top of the ~10 KB a Binance TLS connection already holds
+// could leave the heap all but empty while the body was parsed. That is what
+// the crashes logged in September 2026 turned out to be: the WiFi SDK's
+// ieee80211_setup_ratetable() starts with pvPortZalloc(212) and memcpy()s into
+// the result without a NULL check (seen in the SDK's own disassembly), so the
+// moment it re-read the router's beacon while the heap was exhausted, it
+// wrote to address 0 (Exception 29, epc 0x4000df64 = memcpy). Every logged
+// crash happened while a fetch's response was being read ("act 7").
 static STACK_LEAN bool parseBinanceKlines(StockData& d, Stream& stream) {
-  JsonDocument doc;
-  DeserializationError err = deserializeJson(doc, stream);
-  if (err) return false;
+  const uint32_t deadline = millis() + 8000;   // the body is ~3 KB; don't hang on a stalled stream
+  uint8_t depth  = 0;       // bracket depth: 1 = the outer array, 2 = inside one candle
+  uint8_t field  = 0;       // column index within the current candle
+  bool    inStr  = false;
+  bool    started = false;
+  bool    done   = false;
+  uint8_t count  = 0;
+  char    val[24];
+  uint8_t vlen   = 0;
 
-  JsonArrayConst arr = doc.as<JsonArrayConst>();
-  if (arr.isNull()) return false;
-
-  d.sparkCount = 0;
-  for (JsonArrayConst k : arr) {
-    if (d.sparkCount >= MAX_SPARK_POINTS) break;
-    const char* close = k[4] | "";
-    if (!close[0]) continue;
-    d.spark[d.sparkCount++] = atof(close);
+  while (!done && (int32_t)(millis() - deadline) < 0) {
+    int c = stream.read();
+    if (c < 0) { delay(1); continue; }            // nothing buffered yet
+    if (!started) {
+      if (c == ' ' || c == '\r' || c == '\n' || c == '\t') continue;
+      if (c != '[') return false;                 // e.g. {"code":-1121,"msg":"Invalid symbol."}
+      started = true;
+    }
+    if (c == '"') { inStr = !inStr; continue; }
+    if (inStr) {
+      if (depth == 2 && field == 4 && vlen < sizeof(val) - 1) val[vlen++] = (char)c;
+      continue;
+    }
+    switch (c) {
+      case '[':
+        depth++;
+        if (depth == 2) { field = 0; vlen = 0; }
+        break;
+      case ']':
+        if (depth == 2 && vlen) {
+          val[vlen] = 0;
+          if (count < MAX_SPARK_POINTS) d.spark[count++] = atof(val);
+        }
+        if (depth) depth--;
+        if (depth == 0) done = true;
+        break;
+      case ',':
+        if (depth == 2) field++;
+        break;
+      default:                                    // an unquoted number, just in case
+        if (depth == 2 && field == 4 && vlen < sizeof(val) - 1 &&
+            c != ' ' && c != '\r' && c != '\n' && c != '\t') val[vlen++] = (char)c;
+        break;
+    }
   }
-  return d.sparkCount > 0;
+  if (!done || count == 0) return false;          // keep the previous sparkline
+  d.sparkCount = count;
+  return true;
 }
 
 // ---- parse: cash.ch daily-close series --------------------------------------
@@ -825,6 +869,18 @@ static bool fetchUrl(const Settings& s, const String& url, ParseKind kind, Stock
   crashActivity(ACT_MODE);
   d.dbgLastHttpCode = (int16_t)code;   // diagnostic: surfaced via /api/status regardless of source
   if (code != HTTP_CODE_OK) {
+    http.end();
+    return false;
+  }
+
+  // Heap floor for the parse (v2.9.44, see parseBinanceKlines above for the
+  // crash this guards against): with the TLS connection's buffers already
+  // allocated, the WiFi SDK still needs a few KB of its own at any moment --
+  // it does not survive a failed allocation -- so a JSON document is never
+  // built on top of a heap that's already this low. (The klines scanner
+  // allocates nothing and is exempt.)
+  if (kind != PARSE_BINANCE_KLINES && ESP.getFreeHeap() < PARSE_MIN_FREE_HEAP) {
+    d.dbgLastHttpCode = -1002;
     http.end();
     return false;
   }
