@@ -163,9 +163,13 @@ static bool     g_streakCleared = false;
 // crash screen up (and every feature off) indefinitely after a single crash.
 // Now it lasts SAFE_MODE_RECOVER_MS and then reboots normally -- unless crashes
 // keep coming (SAFE_MODE_MAX_STREAK in a row, each within HEALTHY_RUN_MS of
-// the last recovery), in which case it stays put so a crash loop can't hide.
+// the last recovery), in which case it waits longer so a crash loop can't hide.
 static const uint32_t SAFE_MODE_RECOVER_MS  = 10UL * 60UL * 1000UL;
 static const uint8_t  SAFE_MODE_MAX_STREAK  = 3;
+// ...and even then it tries again hourly: a streak can also come from outside
+// (the WiFi SDK crash of September 2026 did, see Net.cpp), and "stay put" left
+// the device on the crash screen for 38 hours. One crash an hour is harmless.
+static const uint32_t SAFE_MODE_RECOVER_LONG_MS = 60UL * 60UL * 1000UL;
 static const uint32_t HEALTHY_RUN_MS        = 30UL * 60UL * 1000UL;
 static int g_lastBr = -1;        // last effective brightness written (-1 = none yet)
 #if HAS_LDR
@@ -338,8 +342,9 @@ void loop() {
     // See SAFE_MODE_RECOVER_MS above: give the features another go after a
     // while, unless this is already a streak of crashes (or an upload is
     // being written right now).
-    if (g_crashStreak < SAFE_MODE_MAX_STREAK && millis() >= SAFE_MODE_RECOVER_MS &&
-        !Update.isRunning()) {
+    uint32_t recoverAfter = (g_crashStreak < SAFE_MODE_MAX_STREAK) ? SAFE_MODE_RECOVER_MS
+                                                                     : SAFE_MODE_RECOVER_LONG_MS;
+    if (millis() >= recoverAfter && !Update.isRunning()) {
       delay(120);
       ESP.restart();
     }

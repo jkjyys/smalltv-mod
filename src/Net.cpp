@@ -60,6 +60,24 @@ void netBegin(const Settings& s, void (*onProgress)(const char*), bool deferMdns
 
   WiFi.mode(WIFI_STA);
 
+#if defined(SMALLTV_ESP8266)
+  // 802.11g, not the default 802.11n. From September 2026 the device kept
+  // crashing inside the WiFi SDK itself (crash log: Exception 29, a memcpy to
+  // address 0 in ieee80211_setup_ratetable <- ieee80211_phy_init <-
+  // cnx_update_bss_more <- scan_parse_beacon <- sta_input: re-deriving the
+  // PHY rate table from the connected router's beacon). It is a known,
+  // never-fixed NONOS SDK bug (espressif/ESP8266_NONOS_SDK issue #320), and
+  // the standard workaround for SDK trouble with some routers (WLED and
+  // Tasmota both ship a force-802.11g option) is to keep the chip off 802.11n
+  // entirely. 802.11g's 54 Mbit/s is far more than this device ever uses.
+  // If no saved network accepts an 802.11g client (an "N only" router), the
+  // loop below tries again in 802.11n before giving up.
+  WiFi.setPhyMode(WIFI_PHY_MODE_11G);
+  const uint8_t kPasses = 2;
+#else
+  const uint8_t kPasses = 1;
+#endif
+
   // Try order: scan once (blocking is fine here, only the boot screen is up)
   // and put the networks the scan can see first, strongest first. Unseen ones
   // (hidden SSIDs or currently out of range) go last, in config order, with a
@@ -96,31 +114,36 @@ void netBegin(const Settings& s, void (*onProgress)(const char*), bool deferMdns
     }
   }
 
-  for (uint8_t k = 0; k < s.wifiCount; k++) {
-    const WifiCred& n = s.wifi[order[k]];
-    if (onProgress) {
-      char msg[48];
-      snprintf(msg, sizeof(msg), "WiFi: %s", n.ssid.c_str());
-      onProgress(msg);
-    }
-    WiFi.begin(n.ssid.c_str(), n.pass.c_str());
+  for (uint8_t pass = 0; pass < kPasses; pass++) {
+#if defined(SMALLTV_ESP8266)
+    if (pass == 1) WiFi.setPhyMode(WIFI_PHY_MODE_11N);   // see the 802.11g note above
+#endif
+    for (uint8_t k = 0; k < s.wifiCount; k++) {
+      const WifiCred& n = s.wifi[order[k]];
+      if (onProgress) {
+        char msg[48];
+        snprintf(msg, sizeof(msg), "WiFi: %s", n.ssid.c_str());
+        onProgress(msg);
+      }
+      WiFi.begin(n.ssid.c_str(), n.pass.c_str());
 
-    uint32_t budget = seen[order[k]] ? 15000 : 8000;
-    uint32_t start = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - start < budget) {
-      delay(200);
-      yield();
-    }
+      uint32_t budget = seen[order[k]] ? 15000 : 8000;
+      uint32_t start = millis();
+      while (WiFi.status() != WL_CONNECTED && millis() - start < budget) {
+        delay(200);
+        yield();
+      }
 
-    if (WiFi.status() == WL_CONNECTED) {
-      g_curNet = (int8_t)order[k];
-      g_mode = NET_STA;
-      if (!deferMdns) netStartMdns();
-      if (onProgress) onProgress(WiFi.localIP().toString().c_str());
-      return;
+      if (WiFi.status() == WL_CONNECTED) {
+        g_curNet = (int8_t)order[k];
+        g_mode = NET_STA;
+        if (!deferMdns) netStartMdns();
+        if (onProgress) onProgress(WiFi.localIP().toString().c_str());
+        return;
+      }
+      WiFi.disconnect();
+      delay(100);
     }
-    WiFi.disconnect();
-    delay(100);
   }
 
   if (onProgress) onProgress("WiFi failed -> AP");
