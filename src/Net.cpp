@@ -89,6 +89,22 @@ void netBegin(const Settings& s, void (*onProgress)(const char*), bool deferMdns
 
   WiFi.mode(WIFI_STA);
 
+#if defined(SMALLTV_ESP8266)
+  // Radio always on (no modem sleep). Every crash logged since September 2026
+  // died in the WiFi SDK parsing the router's beacon (ieee80211_setup_ratetable
+  // <- ieee80211_phy_init <- cnx_update_bss_more <- scan_parse_beacon), with
+  // pp_tx_idle_timeout -- the SDK's modem-sleep entry -- further up the same
+  // stack, only ever while the features were fetching (the crash log's "act"
+  // pointed at a response being read), never in the idle safe mode, and with
+  // no WiFi disconnect beforehand. Modem sleep powers the radio down between
+  // beacons whenever TX goes idle and back up for traffic, so a device that
+  // fetches every few seconds flips in and out of it constantly; turning it
+  // off is the standard fix for ESP8266 SDK instability of this kind (the
+  // core itself does the same during an OTA write). It costs ~50 mA on USB
+  // power, which this device is always on.
+  WiFi.setSleepMode(WIFI_NONE_SLEEP);
+#endif
+
   // Try order: scan once (blocking is fine here, only the boot screen is up)
   // and put the networks the scan can see first, strongest first. Unseen ones
   // (hidden SSIDs or currently out of range) go last, in config order, with a
@@ -173,11 +189,11 @@ void netLoop() {
   if (!g_downSince) g_downSince = millis();
   // The SDK's own auto-reconnect (setAutoReconnect above) is already retrying
   // the moment the link drops. This used to force WiFi.reconnect() -- a hard
-  // disconnect + connect -- every 10 s on top of it, i.e. tearing down the
-  // SDK's connection attempt mid-flight while it may still be parsing that
-  // router's beacons, which is where every crash of September 2026 died (see
-  // the diagnostics note above). Now it leaves the first 60 s of an outage to
-  // the SDK and only then nudges, every 30 s, as a fallback.
+  // disconnect + connect -- every 10 s on top of it, tearing down the SDK's
+  // own attempt mid-flight. (It was a suspect for the crashes of September
+  // 2026 until the crash log showed zero disconnects before them, but fighting
+  // the SDK's reconnect was never useful either.) Now the first 60 s of an
+  // outage are left to the SDK, then it nudges every 30 s as a fallback.
   uint32_t down = millis() - g_downSince;
   if (down > 60000 && millis() - g_lastReconnect > 30000) {
     g_lastReconnect = millis();
